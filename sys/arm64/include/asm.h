@@ -39,13 +39,13 @@
 #define	_C_LABEL(x)	x
 
 #define	LENTRY(sym)						\
-	.text; .align 2; .type sym,#function; sym:		\
+	.text; .align 2; .type sym,#function; sym: __ ## sym ## _start: \
 	.cfi_startproc
 #define	ENTRY(sym)						\
 	.globl sym; LENTRY(sym)
 #define	EENTRY(sym)						\
 	.globl	sym; sym:
-#define	LEND(sym) .ltorg; .cfi_endproc; .size sym, . - sym
+#define	LEND(sym) .ltorg; .cfi_endproc; .size sym, . - sym; __ ## sym ## _end:
 #define	END(sym) LEND(sym)
 #define	EEND(sym)
 
