@@ -141,7 +141,7 @@ struct profile_probe_percpu;
 
 #ifdef __aarch64__
 /* TODO: verify */
-#define	PROF_ARTIFICIAL_FRAMES	10
+#define	PROF_ARTIFICIAL_FRAMES	11
 #endif
 
 #ifdef __riscv
