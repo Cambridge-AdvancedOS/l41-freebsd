@@ -227,6 +227,8 @@ END(longjmp)
  * pagezero, simple implementation
  */
 ENTRY(pagezero_simple)
+	stp	x29, x30, [sp, #-16]!
+	mov	x29, sp
 	add	x1, x0, #PAGE_SIZE
 
 1:
@@ -236,6 +238,7 @@ ENTRY(pagezero_simple)
 	stp	xzr, xzr, [x0], #0x10
 	cmp	x0, x1
 	b.ne	1b
+	ldp	x29, x30, [sp], #16
 	ret
 
 END(pagezero_simple)
@@ -244,6 +247,8 @@ END(pagezero_simple)
  * pagezero, cache assisted
  */
 ENTRY(pagezero_cache)
+	stp	x29, x30, [sp, #-16]!
+	mov	x29, sp
 	add	x1, x0, #PAGE_SIZE
 
 	ldr	x2, =dczva_line_size
@@ -254,6 +259,7 @@ ENTRY(pagezero_cache)
 	add	x0, x0, x2
 	cmp	x0, x1
 	b.ne	1b
+	ldp	x29, x30, [sp], #16
 	ret
 
 END(pagezero_cache)

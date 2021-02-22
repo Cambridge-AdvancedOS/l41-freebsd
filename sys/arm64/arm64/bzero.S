@@ -39,6 +39,8 @@ __FBSDID("$FreeBSD$");
 	 *  x1 - size
 	 */
 ENTRY(bzero)
+	stp	x29, x30, [sp, #-16]!
+	mov	x29, sp
 	cbz	x1, ending
 
 	/*
@@ -200,6 +202,7 @@ cache_line_zero:
 	b.ne	normal
 
 ending:
+	ldp	x29, x30, [sp], #16
 	ret
 
 END(bzero)
