@@ -190,9 +190,10 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 		intrpc = (void *)(pc_t)solaris_cpu[curcpu].cpu_dtrace_caller;
 
 	/*
-	 * Can't search for the intrpc if we don't process trapframes.
+	 * Can't search for the intrpc if we don't process trapframes, or if
+	 * the caller fails to provide an intrpc value.
 	 */
-	if (!kern_dtrace_stack_trapframes)
+	if (!kern_dtrace_stack_trapframes || intrpc == 0)
 		kern_dtrace_stack_start_at_intrpc = 0;
 
 	/*
@@ -212,12 +213,24 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 	state.pc = (uintptr_t)dtrace_getpcstack;
 
 	if (kern_dtrace_pcstack_debug) {
+		/*
+		 * A zero PC causes the stack printer to terminate, so
+		 * substitute a non-zero value if required.
+		 */
 		dtrace_pushstack_nopcfound(pcstack, pcstack_limit, NULL,
 		    &depth, 0x2b2b);
-		dtrace_pushstack_nopcfound(pcstack, pcstack_limit, NULL,
-		    &depth, (uintptr_t)intrpc);
-		dtrace_pushstack_nopcfound(pcstack, pcstack_limit, NULL,
-		    &depth, aframes);
+		if ((uintptr_t)intrpc != 0)
+			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
+			    NULL, &depth, (uintptr_t)intrpc);
+		else
+			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
+			    NULL, &depth, -1);
+		if (aframes != 0)
+			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
+			    NULL, &depth, aframes);
+		else
+			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
+			    NULL, &depth, -1);
 		dtrace_pushstack_nopcfound(pcstack, pcstack_limit, NULL,
 		    &depth, 0x2b2b);
 	}
