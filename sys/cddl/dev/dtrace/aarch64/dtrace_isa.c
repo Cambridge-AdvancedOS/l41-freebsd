@@ -83,7 +83,7 @@ SYSCTL_INT(_kern_dtrace, OID_AUTO, pcstack_aframes_zero, CTLFLAG_RW,
 /*
  * Only record frames at or after the passed PC value.
  */
-static int kern_dtrace_stack_start_at_intrpc = 0;
+static int kern_dtrace_stack_start_at_intrpc = 1;
 SYSCTL_INT(_kern_dtrace, OID_AUTO, stack_start_at_intrpc, CTLFLAG_RW,
     &kern_dtrace_stack_start_at_intrpc, 0,
     "Only record stack frames once we've hit the exception PC");
