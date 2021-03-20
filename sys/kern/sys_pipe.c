@@ -209,6 +209,7 @@ static int pipefragretry;
 static int pipeallocfail;
 static int piperesizefail;
 static int piperesizeallowed = 1;
+static long pipe_mindirect = PIPE_MINDIRECT;
 
 SYSCTL_LONG(_kern_ipc, OID_AUTO, maxpipekva, CTLFLAG_RDTUN | CTLFLAG_NOFETCH,
 	   &maxpipekva, 0, "Pipe KVA limit");
@@ -222,6 +223,8 @@ SYSCTL_INT(_kern_ipc, OID_AUTO, piperesizefail, CTLFLAG_RD,
 	  &piperesizefail, 0, "Pipe resize failures");
 SYSCTL_INT(_kern_ipc, OID_AUTO, piperesizeallowed, CTLFLAG_RW,
 	  &piperesizeallowed, 0, "Pipe resizing allowed");
+SYSCTL_LONG(_kern_ipc, OID_AUTO, pipe_mindirect, CTLFLAG_RWTUN,
+	  &pipe_mindirect, 0, "Pipe minimum I/OO size for VM optimization");
 
 static void pipeinit(void *dummy __unused);
 static void pipeclose(struct pipe *cpipe);
@@ -1140,8 +1143,8 @@ pipe_write(struct file *fp, struct uio *uio, struct ucred *active_cred,
 		 * away on us.
 		 */
 		if (uio->uio_segflg == UIO_USERSPACE &&
-		    uio->uio_iov->iov_len >= PIPE_MINDIRECT &&
-		    wpipe->pipe_buffer.size >= PIPE_MINDIRECT &&
+		    uio->uio_iov->iov_len >= pipe_mindirect &&
+		    wpipe->pipe_buffer.size >= pipe_mindirect &&
 		    (fp->f_flag & FNONBLOCK) == 0) {
 			error = pipe_direct_write(wpipe, uio);
 			if (error != 0)
