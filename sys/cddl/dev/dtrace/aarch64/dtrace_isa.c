@@ -73,22 +73,6 @@ extern void *__handle_el1h_sync_end;
 SYSCTL_DECL(_kern_dtrace);
 
 /*
- * Force aframes to zero regardless of the provider.
- */
-static int kern_dtrace_pcstack_aframes_zero;
-SYSCTL_INT(_kern_dtrace, OID_AUTO, pcstack_aframes_zero, CTLFLAG_RW,
-    &kern_dtrace_pcstack_aframes_zero, 0,
-    "Force DTrace stack-trace aframes to zero");
-
-/*
- * Only record frames at or after the passed PC value.
- */
-static int kern_dtrace_stack_start_at_intrpc = 1;
-SYSCTL_INT(_kern_dtrace, OID_AUTO, stack_start_at_intrpc, CTLFLAG_RW,
-    &kern_dtrace_stack_start_at_intrpc, 0,
-    "Only record stack frames once we've hit the exception PC");
-
-/*
  * Enable trap-frame handling.
  */
 static int kern_dtrace_stack_trapframes = 1;
@@ -103,40 +87,11 @@ static int kern_dtrace_aframes = 1;
 SYSCTL_INT(_kern_dtrace, OID_AUTO, aframes, CTLFLAG_RW, &kern_dtrace_aframes,
     0, "Enable processing of aframes requested by the provider");
 
-/*
- * Enable artifical frames at the start of the trace.
- */
-static int kern_dtrace_pcstack_debug = 0;
-SYSCTL_INT(_kern_dtrace, OID_AUTO, pcstack_debug, CTLFLAG_RW,
-    &kern_dtrace_pcstack_debug, 0,
-    "Inject psecial frames with debug data");
-
-/*
- * Allow dtrace_caller to replace intrpc when defined.
- */
-static int kern_dtrace_pcstack_dtracecaller = 1;
-SYSCTL_INT(_kern_dtrace, OID_AUTO, pcstack_dtracecaller, CTLFLAG_RW,
-    &kern_dtrace_pcstack_dtracecaller, 0,
-    "Allow cpu->pc_dtrace_caller to replace intrprc for FDT probes");
-
-static int kern_dtrace_pcstack_pcfound;
-SYSCTL_INT(_kern_dtrace, OID_AUTO, pcstack_pcfound, CTLFLAG_RD,
-    &kern_dtrace_pcstack_pcfound, 0,
-    "Count of the number of times intrpc matched, enabling tracing");
-
 static void
 dtrace_pushstack(pc_t *pcstack, int pcstack_limit, int *aframesp, int *depthp,
-    intptr_t pc, int *pc_foundp, intptr_t pc_target)
+    intptr_t pc)
 {
 
-	if (kern_dtrace_stack_start_at_intrpc && pc_foundp != NULL) {
-		if (!(*pc_foundp)) {
-			if (pc != pc_target)
-				return;
-			*pc_foundp = 1;
-			kern_dtrace_pcstack_pcfound++;
-		}
-	}
 	if (*depthp == pcstack_limit)
 		return;
 	if (kern_dtrace_aframes && aframesp != NULL) {
@@ -147,15 +102,6 @@ dtrace_pushstack(pc_t *pcstack, int pcstack_limit, int *aframesp, int *depthp,
 	}
 	pcstack[*depthp] = pc;
 	(*depthp)++;
-}
-
-static void
-dtrace_pushstack_nopcfound(pc_t *pcstack, int pcstack_limit, int *aframesp,
-    int *depthp, intptr_t pc)
-{
-
-	dtrace_pushstack(pcstack, pcstack_limit, aframesp, depthp, pc, NULL,
-	    0);
 }
 
 static int
@@ -180,29 +126,6 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 	int pc_found;
 	int depth;
 
-	/*
-	 * When running with FBT, intrpc is not set to a value that appears in
-	 * the stack, so instead search for cpu_dtrace_caller.  Only FBT sets
-	 * up cpu_dtrace_caller, and clears it after the probe completes.
-	 */
-	if (kern_dtrace_pcstack_dtracecaller &&
-	    ((pc_t)solaris_cpu[curcpu].cpu_dtrace_caller != 0))
-		intrpc = (void *)(pc_t)solaris_cpu[curcpu].cpu_dtrace_caller;
-
-	/*
-	 * Can't search for the intrpc if we don't process trapframes, or if
-	 * the caller fails to provide an intrpc value.
-	 */
-	if (!kern_dtrace_stack_trapframes || intrpc == 0)
-		kern_dtrace_stack_start_at_intrpc = 0;
-
-	/*
-	 * If we are starting the trace with a specific intrpc, we can ignore
-	 * aframes.
-	 */
-	if (kern_dtrace_stack_start_at_intrpc ||
-	    kern_dtrace_pcstack_aframes_zero)
-		aframes = 0;
 	depth = 0;
 	pc_found = 0;
 	pc_prior = NULL;
@@ -212,28 +135,6 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 	state.sp = sp;
 	state.pc = (uintptr_t)dtrace_getpcstack;
 
-	if (kern_dtrace_pcstack_debug) {
-		/*
-		 * A zero PC causes the stack printer to terminate, so
-		 * substitute a non-zero value if required.
-		 */
-		dtrace_pushstack_nopcfound(pcstack, pcstack_limit, NULL,
-		    &depth, 0x2b2b);
-		if ((uintptr_t)intrpc != 0)
-			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
-			    NULL, &depth, (uintptr_t)intrpc);
-		else
-			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
-			    NULL, &depth, -1);
-		if (aframes != 0)
-			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
-			    NULL, &depth, aframes);
-		else
-			dtrace_pushstack_nopcfound(pcstack, pcstack_limit,
-			    NULL, &depth, -1);
-		dtrace_pushstack_nopcfound(pcstack, pcstack_limit, NULL,
-		    &depth, 0x2b2b);
-	}
 	while (depth < pcstack_limit) {
 		if (!unwind_frame(curthread, &state))
 			break;
@@ -254,7 +155,7 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 			 * Print the exception-handler PC reliably first.
 			 */
 			dtrace_pushstack(pcstack, pcstack_limit, &aframes,
-			    &depth, state.pc, &pc_found, (intptr_t)intrpc);
+			    &depth, state.pc);
 
 			/*
 			 * Now find and inspect the stack frame.
@@ -268,11 +169,8 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 			 * other cases?  For now, insert LR twice rather than
 			 * no times, but need to do better.
 			 */
-			if (kern_dtrace_pcstack_debug)
-				dtrace_pushstack_nopcfound(pcstack,
-				    pcstack_limit, &aframes, &depth, 0xeeee);
 			dtrace_pushstack(pcstack, pcstack_limit, &aframes,
-			    &depth, tf->tf_elr, &pc_found, (intptr_t)intrpc);
+			    &depth, tf->tf_elr);
 
 			/*
 			 * NB: As with unwind_state(), trim 4 from LR to give
@@ -281,10 +179,7 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 			 */
 			pc_prior = (void *)(tf->tf_lr - 4);
 			dtrace_pushstack(pcstack, pcstack_limit, &aframes,
-			    &depth, tf->tf_lr - 4, &pc_found, (intptr_t)intrpc);
-			if (kern_dtrace_pcstack_debug)
-				dtrace_pushstack_nopcfound(pcstack,
-				    pcstack_limit, &aframes, &depth, 0xeeee);
+			    &depth, tf->tf_lr - 4);
 
 			/*
 			 * Use exception frame to find the next stack frame
@@ -313,15 +208,11 @@ dtrace_getpcstack(pc_t *pcstack, int pcstack_limit, int aframes,
 			if (pc_prior == NULL ||
 			    (pc_prior != NULL && pc_prior != (void *)state.pc))
 				dtrace_pushstack(pcstack, pcstack_limit,
-				    &aframes, &depth, state.pc, &pc_found,
-				    (intptr_t)intrpc);
+				    &aframes, &depth, state.pc);
 			pc_prior = NULL;
 		}
 	}
 
-	if (kern_dtrace_pcstack_debug)
-		dtrace_pushstack_nopcfound(pcstack, pcstack_limit, &aframes,
-		    &depth, 0xe0e0);
 	for (; depth < pcstack_limit; depth++) {
 		pcstack[depth] = 0;
 	}
