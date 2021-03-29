@@ -1,0 +1,15 @@
+#
+# ADVOPSYS
+#
+# Custom kernel for arm64 that includes optional kernel features required for
+# Cambridge Advanced Operating Systems (Part II / Part III / ACS).
+#
+
+#NO_UNIVERSE
+
+include		GENERIC-MMCCAM
+ident		ADVOPSYS
+
+options 	DUMMYNET
+options 	IPFIREWALL
+options 	IPFIREWALL_DEFAULT_TO_ACCEPT
