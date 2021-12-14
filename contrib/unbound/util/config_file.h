@@ -93,6 +93,12 @@ struct config_file {
 	int do_udp;
 	/** do tcp query support. */
 	int do_tcp;
+	/** max number of queries on a reuse connection. */
+	size_t max_reuse_tcp_queries;
+	/** timeout for REUSE entries in milliseconds. */
+	int tcp_reuse_timeout;
+	/** timeout in milliseconds for TCP queries to auth servers. */
+	int tcp_auth_query_timeout;
 	/** tcp upstream queries (no UDP upstream queries) */
 	int tcp_upstream;
 	/** udp upstream enabled when no UDP downstream is enabled (do_udp no)*/
@@ -334,10 +340,18 @@ struct config_file {
 	int hide_version;
 	/** do not report trustanchor (trustanchor.unbound) */
 	int hide_trustanchor;
+	/** do not report the User-Agent HTTP header */
+	int hide_http_user_agent;
 	/** identity, hostname is returned if "". */
 	char* identity;
 	/** version, package version returned if "". */
 	char* version;
+	/** User-Agent for HTTP header */
+	char* http_user_agent;
+	/** nsid */
+	char *nsid_cfg_str;
+	uint8_t *nsid;
+	uint16_t nsid_len;
 
 	/** the module configuration string */
 	char* module_conf;
@@ -363,6 +377,8 @@ struct config_file {
 	int32_t val_sig_skew_min;
 	/** the maximum for signature clock skew */
 	int32_t val_sig_skew_max;
+	/** max number of query restarts, number of IPs to probe */
+	int32_t val_max_restart;
 	/** this value sets the number of seconds before revalidating bogus */
 	int bogus_ttl; 
 	/** should validator clean additional section for secure msgs */
@@ -388,8 +404,12 @@ struct config_file {
 	/** serve expired entries only after trying to update the entries and this
 	 *  timeout (in milliseconds) is reached */
 	int serve_expired_client_timeout;
+	/** serve original TTLs rather than decrementing ones */
+	int serve_original_ttl;
 	/** nsec3 maximum iterations per key size, string */
 	char* val_nsec3_key_iterations;
+	/** if zonemd failures are permitted, only logged */
+	int zonemd_permissive_mode;
 	/** autotrust add holddown time, in seconds */
 	unsigned int add_holddown;
 	/** autotrust del holddown time, in seconds */
@@ -558,6 +578,8 @@ struct config_file {
 	struct config_str2list* ratelimit_below_domain;
 	/** ratelimit factor, 0 blocks all, 10 allows 1/10 of traffic */
 	int ratelimit_factor;
+	/** number of retries on outgoing queries */
+	int outbound_msg_retry;
 	/** minimise outgoing QNAME and hide original QTYPE if possible */
 	int qname_minimisation;
 	/** minimise QNAME in strict mode, minimise according to RFC.
@@ -596,6 +618,17 @@ struct config_file {
 	size_t dnscrypt_nonce_cache_size;
 	/** number of slabs for dnscrypt nonces cache */
 	size_t dnscrypt_nonce_cache_slabs;
+
+	/** EDNS padding according to RFC7830 and RFC8467 */
+	/** true to enable padding of responses (default: on) */
+	int pad_responses;
+	/** block size with which to pad encrypted responses (default: 468) */
+	size_t pad_responses_block_size;
+	/** true to enable padding of queries (default: on) */
+	int pad_queries;
+	/** block size with which to pad encrypted queries (default: 128) */
+	size_t pad_queries_block_size;
+
 	/** IPsec module */
 #ifdef USE_IPSECMOD
 	/** false to bypass the IPsec module */
@@ -666,6 +699,8 @@ struct config_stub {
 	int isprime;
 	/** if forward-first is set (failover to without if fails) */
 	int isfirst;
+	/** use tcp for queries to this stub */
+	int tcp_upstream;
 	/** use SSL for queries to this stub */
 	int ssl_upstream;
 	/*** no cache */
@@ -710,6 +745,10 @@ struct config_auth {
 	/** Always reply with this CNAME target if the cname override action is
 	 * used */
 	char* rpz_cname;
+	/** Check ZONEMD records for this zone */
+	int zonemd_check;
+	/** Reject absence of ZONEMD records, zone must have one */
+	int zonemd_reject_absence;
 };
 
 /**
@@ -1071,6 +1110,16 @@ int cfg_count_numbers(const char* str);
 int cfg_parse_memsize(const char* str, size_t* res);
 
 /**
+ * Parse nsid from string into binary nsid. nsid is either a hexadecimal
+ * string or an ascii string prepended with ascii_ in which case the
+ * characters after ascii_ are simply copied.
+ * @param str: the string to parse.
+ * @param nsid_len: returns length of nsid in bytes.
+ * @return malloced bytes or NULL on parse error or malloc failure.
+ */
+uint8_t* cfg_parse_nsid(const char* str, uint16_t* nsid_len);
+
+/**
  * Add a tag name to the config.  It is added at the end with a new ID value.
  * @param cfg: the config structure.
  * @param tag: string (which is copied) with the name.
@@ -1144,6 +1193,13 @@ int cfg_mark_ports(const char* str, int allow, int* avail, int num);
  * @return: number of ports in array or 0 on error.
  */
 int cfg_condense_ports(struct config_file* cfg, int** avail);
+
+/**
+ * Apply system specific port range policy.
+ * @param cfg: config file.
+ * @param num: size of the array (65536).
+ */
+void cfg_apply_local_port_policy(struct config_file* cfg, int num);
 
 /**
  * Scan ports available
@@ -1273,6 +1329,20 @@ void w_config_adjust_directory(struct config_file* cfg);
 
 /** debug option for unit tests. */
 extern int fake_dsa, fake_sha1;
+
+/** see if interface is https, its port number == the https port number */
+int if_is_https(const char* ifname, const char* port, int https_port);
+
+/**
+ * Return true if the config contains settings that enable https.
+ * @param cfg: config information.
+ * @return true if https ports are used for server.
+ */
+int cfg_has_https(struct config_file* cfg);
+
+#ifdef USE_LINUX_IP_LOCAL_PORT_RANGE
+#define LINUX_IP_LOCAL_PORT_RANGE_PATH "/proc/sys/net/ipv4/ip_local_port_range"
+#endif
 
 #endif /* UTIL_CONFIG_FILE_H */
 

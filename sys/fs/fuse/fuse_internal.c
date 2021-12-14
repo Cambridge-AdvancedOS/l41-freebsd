@@ -255,7 +255,8 @@ fuse_internal_access(struct vnode *vp,
  */
 void
 fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
-	uint64_t attr_valid, uint32_t attr_valid_nsec, struct vattr *vap)
+	uint64_t attr_valid, uint32_t attr_valid_nsec, struct vattr *vap,
+	bool from_server)
 {
 	struct mount *mp;
 	struct fuse_vnode_data *fvdat;
@@ -271,9 +272,54 @@ fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
 	fuse_validity_2_bintime(attr_valid, attr_valid_nsec,
 		&fvdat->attr_cache_timeout);
 
+	if (vnode_isreg(vp) &&
+	    fvdat->cached_attrs.va_size != VNOVAL &&
+	    attr->size != fvdat->cached_attrs.va_size)
+	{
+		if ( data->cache_mode == FUSE_CACHE_WB &&
+		    fvdat->flag & FN_SIZECHANGE)
+		{
+			const char *msg;
+
+			/*
+			 * The server changed the file's size even though we're
+			 * using writeback cacheing and and we have outstanding
+			 * dirty writes!  That's a server bug.
+			 */
+			if (fuse_libabi_geq(data, 7, 23)) {
+				msg = "writeback cache incoherent!."
+				    "To prevent data corruption, disable "
+				    "the writeback cache according to your "
+				    "FUSE server's documentation.";
+			} else {
+				msg = "writeback cache incoherent!."
+				    "To prevent data corruption, disable "
+				    "the writeback cache by setting "
+				    "vfs.fusefs.data_cache_mode to 0 or 1.";
+			}
+			fuse_warn(data, FSESS_WARN_WB_CACHE_INCOHERENT, msg);
+		}
+		if (fuse_vnode_attr_cache_valid(vp) &&
+		    data->cache_mode != FUSE_CACHE_UC)
+		{
+			/*
+			 * The server changed the file's size even though we
+			 * have it cached and our cache has not yet expired.
+			 * That's a bug.
+			 */
+			fuse_warn(data, FSESS_WARN_CACHE_INCOHERENT,
+			    "cache incoherent!  "
+			    "To prevent "
+			    "data corruption, disable the data cache "
+			    "by mounting with -o direct_io, or as "
+			    "directed otherwise by your FUSE server's "
+			    "documentation.");
+		}
+	}
+
 	/* Fix our buffers if the filesize changed without us knowing */
 	if (vnode_isreg(vp) && attr->size != fvdat->cached_attrs.va_size) {
-		(void)fuse_vnode_setsize(vp, attr->size);
+		(void)fuse_vnode_setsize(vp, attr->size, from_server);
 		fvdat->cached_attrs.va_size = attr->size;
 	}
 
@@ -363,7 +409,7 @@ fuse_internal_fsync(struct vnode *vp,
 		ffsi->fsync_flags = 0;
 
 		if (datasync)
-			ffsi->fsync_flags = 1;
+			ffsi->fsync_flags = FUSE_FSYNC_FDATASYNC;
 
 		if (waitfor == MNT_WAIT) {
 			err = fdisp_wait_answ(&fdi);
@@ -583,7 +629,7 @@ fuse_internal_readdir_processdata(struct uio *uio,
     u_long **cookiesp)
 {
 	int err = 0;
-	int bytesavail;
+	int oreclen;
 	size_t freclen;
 
 	struct dirent *de;
@@ -620,10 +666,10 @@ fuse_internal_readdir_processdata(struct uio *uio,
 			err = EINVAL;
 			break;
 		}
-		bytesavail = GENERIC_DIRSIZ((struct pseudo_dirent *)
+		oreclen = GENERIC_DIRSIZ((struct pseudo_dirent *)
 					    &fudge->namelen);
 
-		if (bytesavail > uio_resid(uio)) {
+		if (oreclen > uio_resid(uio)) {
 			/* Out of space for the dir so we are done. */
 			err = -1;
 			break;
@@ -633,12 +679,13 @@ fuse_internal_readdir_processdata(struct uio *uio,
 		 * the requested offset in the directory is found.
 		 */
 		if (*fnd_start != 0) {
-			fiov_adjust(cookediov, bytesavail);
-			bzero(cookediov->base, bytesavail);
+			fiov_adjust(cookediov, oreclen);
+			bzero(cookediov->base, oreclen);
 
 			de = (struct dirent *)cookediov->base;
 			de->d_fileno = fudge->ino;
-			de->d_reclen = bytesavail;
+			de->d_off = fudge->off;
+			de->d_reclen = oreclen;
 			de->d_type = fudge->type;
 			de->d_namlen = fudge->namelen;
 			memcpy((char *)cookediov->base + sizeof(struct dirent) -
@@ -805,7 +852,7 @@ fuse_internal_newentry_core(struct vnode *dvp,
 	fuse_vnode_clear_attr_cache(dvp);
 
 	fuse_internal_cache_attrs(*vpp, &feo->attr, feo->attr_valid,
-		feo->attr_valid_nsec, NULL);
+		feo->attr_valid_nsec, NULL, true);
 
 	return err;
 }
@@ -869,9 +916,6 @@ fuse_internal_forget_send(struct mount *mp,
 	fdisp_destroy(&fdi);
 }
 
-SDT_PROBE_DEFINE2(fusefs, , internal, getattr_cache_incoherent,
-	"struct vnode*", "struct fuse_attr_out*");
-
 /* Fetch the vnode's attributes from the daemon*/
 int
 fuse_internal_do_getattr(struct vnode *vp, struct vattr *vap,
@@ -914,26 +958,8 @@ fuse_internal_do_getattr(struct vnode *vp, struct vattr *vap,
 		fao->attr.mtime = old_mtime.tv_sec;
 		fao->attr.mtimensec = old_mtime.tv_nsec;
 	}
-	if (vnode_isreg(vp) &&
-	    fvdat->cached_attrs.va_size != VNOVAL &&
-	    fao->attr.size != fvdat->cached_attrs.va_size) {
-		/*
-		 * The server changed the file's size even though we had it
-		 * cached!  That's a server bug.
-		 */
-		SDT_PROBE2(fusefs, , internal, getattr_cache_incoherent, vp,
-		    fao);
-		printf("%s: cache incoherent on %s!  "
-		    "Buggy FUSE server detected.  To prevent data corruption, "
-		    "disable the data cache by mounting with -o direct_io, or "
-		    "as directed otherwise by your FUSE server's "
-		    "documentation\n", __func__,
-		    vnode_mount(vp)->mnt_stat.f_mntonname);
-		int iosize = fuse_iosize(vp);
-		v_inval_buf_range(vp, 0, INT64_MAX, iosize);
-	}
 	fuse_internal_cache_attrs(vp, &fao->attr, fao->attr_valid,
-		fao->attr_valid_nsec, vap);
+		fao->attr_valid_nsec, vap, true);
 	if (vtyp != vnode_vtype(vp)) {
 		fuse_internal_vnode_disappear(vp);
 		err = ENOENT;
@@ -1011,6 +1037,10 @@ fuse_internal_init_callback(struct fuse_ticket *tick, struct uio *uio)
 				data->dataflags |= FSESS_POSIX_LOCKS;
 			if (fiio->flags & FUSE_EXPORT_SUPPORT)
 				data->dataflags |= FSESS_EXPORT_SUPPORT;
+			if (fiio->flags & FUSE_NO_OPEN_SUPPORT)
+				data->dataflags |= FSESS_NO_OPEN_SUPPORT;
+			if (fiio->flags & FUSE_NO_OPENDIR_SUPPORT)
+				data->dataflags |= FSESS_NO_OPENDIR_SUPPORT;
 			/* 
 			 * Don't bother to check FUSE_BIG_WRITES, because it's
 			 * redundant with max_write
@@ -1100,7 +1130,6 @@ fuse_internal_send_init(struct fuse_data *data, struct thread *td)
 	 * FUSE_DO_READDIRPLUS: not yet implemented
 	 * FUSE_READDIRPLUS_AUTO: not yet implemented
 	 * FUSE_ASYNC_DIO: not yet implemented
-	 * FUSE_NO_OPEN_SUPPORT: not yet implemented
 	 * FUSE_PARALLEL_DIROPS: not yet implemented
 	 * FUSE_HANDLE_KILLPRIV: not yet implemented
 	 * FUSE_POSIX_ACL: not yet implemented
@@ -1109,7 +1138,8 @@ fuse_internal_send_init(struct fuse_data *data, struct thread *td)
 	 * FUSE_MAX_PAGES: not yet implemented
 	 */
 	fiii->flags = FUSE_ASYNC_READ | FUSE_POSIX_LOCKS | FUSE_EXPORT_SUPPORT
-		| FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE;
+		| FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE
+		| FUSE_NO_OPEN_SUPPORT | FUSE_NO_OPENDIR_SUPPORT;
 
 	fuse_insert_callback(fdi.tick, fuse_internal_init_callback);
 	fuse_insert_message(fdi.tick, false);
@@ -1229,7 +1259,7 @@ int fuse_internal_setattr(struct vnode *vp, struct vattr *vap,
 		struct fuse_attr_out *fao = (struct fuse_attr_out*)fdi.answ;
 		fuse_vnode_undirty_cached_timestamps(vp);
 		fuse_internal_cache_attrs(vp, &fao->attr, fao->attr_valid,
-			fao->attr_valid_nsec, NULL);
+			fao->attr_valid_nsec, NULL, false);
 	}
 
 out:

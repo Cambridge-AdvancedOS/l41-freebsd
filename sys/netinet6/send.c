@@ -115,7 +115,9 @@ send_output(struct mbuf *m, struct ifnet *ifp, int direction)
 	struct ip6_hdr *ip6;
 	struct sockaddr_in6 dst;
 	struct icmp6_hdr *icmp6;
+	struct epoch_tracker et;
 	int icmp6len;
+	int error;
 
 	/*
 	 * Receive incoming (SeND-protected) or outgoing traffic
@@ -142,15 +144,19 @@ send_output(struct mbuf *m, struct ifnet *ifp, int direction)
 
 		ip6 = mtod(m, struct ip6_hdr *);
 		icmp6 = (struct icmp6_hdr *)(ip6 + 1);
+		error = 0;
 
 		/*
 		 * Output the packet as icmp6.c:icpm6_input() would do.
 		 * The mbuf is always consumed, so we do not have to
 		 * care about that.
 		 */
+		NET_EPOCH_ENTER(et);
 		switch (icmp6->icmp6_type) {
 		case ND_NEIGHBOR_SOLICIT:
+			NET_EPOCH_ENTER(et);
 			nd6_ns_input(m, sizeof(struct ip6_hdr), icmp6len);
+			NET_EPOCH_EXIT(et);
 			break;
 		case ND_NEIGHBOR_ADVERT:
 			nd6_na_input(m, sizeof(struct ip6_hdr), icmp6len);
@@ -166,9 +172,11 @@ send_output(struct mbuf *m, struct ifnet *ifp, int direction)
 			break;
 		default:
 			m_freem(m);
-			return (ENOSYS);
+			error = ENOSYS;
 		}
-		return (0);
+		NET_EPOCH_EXIT(et);
+
+		return (error);
 
 	case SND_OUT:
 		if (m->m_len < sizeof(struct ip6_hdr)) {
@@ -196,7 +204,6 @@ send_output(struct mbuf *m, struct ifnet *ifp, int direction)
 		 * XXX-BZ as we added data, what about fragmenting,
 		 * if now needed?
 		 */
-		int error;
 		error = ((*ifp->if_output)(ifp, m, (struct sockaddr *)&dst,
 		    NULL));
 		if (error)
@@ -226,6 +233,14 @@ send_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		__func__, so, V_send_so));
 
 	sendsrc = (struct sockaddr_send *)nam;
+	if (sendsrc->send_family != AF_INET6) {
+		error = EAFNOSUPPORT;
+		goto err;
+	}
+	if (sendsrc->send_len != sizeof(*sendsrc)) {
+		error = EINVAL;
+		goto err;
+	}
 	ifp = ifnet_byindex_ref(sendsrc->send_ifidx);
 	if (ifp == NULL) {
 		error = ENETUNREACH;
@@ -237,8 +252,11 @@ send_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 	m = NULL;
 
 err:
+	if (control != NULL)
+		m_freem(control);
 	if (m != NULL)
 		m_freem(m);
+
 	return (error);
 }
 
@@ -291,7 +309,7 @@ send_input(struct mbuf *m, struct ifnet *ifp, int direction, int msglen __unused
 	SOCKBUF_LOCK(&V_send_so->so_rcv);
 	if (sbappendaddr_locked(&V_send_so->so_rcv,
 	    (struct sockaddr *)&sendsrc, m, NULL) == 0) {
-		SOCKBUF_UNLOCK(&V_send_so->so_rcv);
+		soroverflow_locked(V_send_so);
 		/* XXX stats. */
 		m_freem(m);
 	} else {

@@ -257,8 +257,8 @@ struct inplace_cb {
 typedef int inplace_cb_reply_func_type(struct query_info* qinfo,
 	struct module_qstate* qstate, struct reply_info* rep, int rcode,
 	struct edns_data* edns, struct edns_option** opt_list_out,
-	struct comm_reply* repinfo, struct regional* region, int id,
-	void* callback);
+	struct comm_reply* repinfo, struct regional* region,
+	struct timeval* start_time, int id, void* callback);
 
 /**
  * Inplace callback function called before sending the query to a nameserver.
@@ -354,10 +354,11 @@ struct module_env {
 	 * @param addrlen: length of addr.
 	 * @param zone: delegation point name.
 	 * @param zonelen: length of zone name.
+	 * @param tcp_upstream: use TCP for upstream queries.
 	 * @param ssl_upstream: use SSL for upstream queries.
 	 * @param tls_auth_name: if ssl_upstream, use this name with TLS
 	 * 	authentication.
-	 * @param q: wich query state to reactivate upon return.
+	 * @param q: which query state to reactivate upon return.
 	 * @return: false on failure (memory or socket related). no query was
 	 *	sent. Or returns an outbound entry with qsent and qstate set.
 	 *	This outbound_entry will be used on later module invocations
@@ -366,7 +367,7 @@ struct module_env {
 	struct outbound_entry* (*send_query)(struct query_info* qinfo,
 		uint16_t flags, int dnssec, int want_dnssec, int nocaps,
 		struct sockaddr_storage* addr, socklen_t addrlen,
-		uint8_t* zone, size_t zonelen, int ssl_upstream,
+		uint8_t* zone, size_t zonelen, int tcp_upstream, int ssl_upstream,
 		char* tls_auth_name, struct module_qstate* q);
 
 	/**

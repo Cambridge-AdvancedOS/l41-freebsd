@@ -243,7 +243,6 @@ checkfilesys(char *filesys)
 	char errmsg[255];
 	int ofsmodified;
 	int iovlen;
-	int cylno;
 	intmax_t blks, files;
 	size_t size;
 
@@ -296,20 +295,20 @@ checkfilesys(char *filesys)
 		 */
 		if ((fsreadfd = open(filesys, O_RDONLY)) < 0 || readsb(0) == 0)
 			exit(3);	/* Cannot read superblock */
-		if (nflag || (fswritefd = open(filesys, O_WRONLY)) < 0) {
+		if (bkgrdflag == 0 &&
+		    (nflag || (fswritefd = open(filesys, O_WRONLY)) < 0)) {
 			fswritefd = -1;
 			if (preen)
 				pfatal("NO WRITE ACCESS");
 			printf(" (NO WRITE)");
 		}
 		if ((sblock.fs_flags & FS_GJOURNAL) != 0) {
-			//printf("GJournaled file system detected on %s.\n",
-			//    filesys);
 			if (sblock.fs_clean == 1) {
 				pwarn("FILE SYSTEM CLEAN; SKIPPING CHECKS\n");
 				exit(0);
 			}
 			if ((sblock.fs_flags & (FS_UNCLEAN | FS_NEEDSFSCK)) == 0) {
+				bufinit();
 				gjournal_check(filesys);
 				if (chkdoreload(mntp) == 0)
 					exit(0);
@@ -317,10 +316,10 @@ checkfilesys(char *filesys)
 			} else {
 				pfatal(
 			    "UNEXPECTED INCONSISTENCY, CANNOT RUN FAST FSCK\n");
-				close(fsreadfd);
-				close(fswritefd);
 			}
 		}
+		close(fsreadfd);
+		close(fswritefd);
 	}
 	/*
 	 * If we are to do a background check:
@@ -627,11 +626,6 @@ checkfilesys(char *filesys)
 		resolved = 0;
 	ckfini(resolved);
 
-	for (cylno = 0; cylno < sblock.fs_ncg; cylno++)
-		if (inostathead[cylno].il_stat != NULL)
-			free((char *)inostathead[cylno].il_stat);
-	free((char *)inostathead);
-	inostathead = NULL;
 	if (fsmodified && !preen)
 		printf("\n***** FILE SYSTEM WAS MODIFIED *****\n");
 	if (rerun) {

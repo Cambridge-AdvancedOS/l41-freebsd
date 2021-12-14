@@ -669,8 +669,8 @@ restart:
 	if (error == 0)
 		error = VOP_CREATE(nd.ni_dvp, &nd.ni_vp, &nd.ni_cnd, &vattr);
 	NDFREE(&nd, NDF_ONLY_PNBUF);
-	vput(nd.ni_dvp);
 	if (error) {
+		VOP_VPUT_PAIR(nd.ni_dvp, NULL, true);
 		vn_finished_write(mp);
 		if (error == ERELOOKUP)
 			goto restart;
@@ -686,7 +686,8 @@ restart:
 	unp->unp_addr = soun;
 	unp->unp_flags &= ~UNP_BINDING;
 	UNP_PCB_UNLOCK(unp);
-	VOP_UNLOCK(vp);
+	vref(vp);
+	VOP_VPUT_PAIR(nd.ni_dvp, &vp, true);
 	vn_finished_write(mp);
 	free(buf, M_TEMP);
 	return (0);
@@ -1000,7 +1001,7 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 	struct unpcb *unp, *unp2;
 	struct socket *so2;
 	u_int mbcnt, sbcc;
-	int freed, error;
+	int error;
 
 	unp = sotounpcb(so);
 	KASSERT(unp != NULL, ("%s: unp == NULL", __func__));
@@ -1008,7 +1009,7 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 	    so->so_type == SOCK_SEQPACKET,
 	    ("%s: socktype %d", __func__, so->so_type));
 
-	freed = error = 0;
+	error = 0;
 	if (flags & PRUS_OOB) {
 		error = EOPNOTSUPP;
 		goto release;
@@ -1058,7 +1059,7 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 			m = NULL;
 			control = NULL;
 		} else {
-			SOCKBUF_UNLOCK(&so2->so_rcv);
+			soroverflow_locked(so2);
 			error = ENOBUFS;
 		}
 		if (nam != NULL)
@@ -1601,7 +1602,7 @@ unp_connectat(int fd, struct socket *so, struct sockaddr *nam,
 		goto bad2;
 	}
 	if (connreq) {
-		if (so2->so_options & SO_ACCEPTCONN) {
+		if (SOLISTENING(so2)) {
 			CURVNET_SET(so2->so_vnet);
 			so2 = sonewconn(so2, 0);
 			CURVNET_RESTORE();
@@ -1961,7 +1962,7 @@ unp_shutdown(struct unpcb *unp)
 static void
 unp_drop(struct unpcb *unp)
 {
-	struct socket *so = unp->unp_socket;
+	struct socket *so;
 	struct unpcb *unp2;
 
 	/*
@@ -1971,6 +1972,7 @@ unp_drop(struct unpcb *unp)
 	 */
 
 	UNP_PCB_LOCK(unp);
+	so = unp->unp_socket;
 	if (so)
 		so->so_error = ECONNRESET;
 	if ((unp2 = unp_pcb_lock_peer(unp)) != NULL) {
@@ -2066,7 +2068,7 @@ unp_externalize(struct mbuf *control, struct mbuf **controlp, int flags)
 			}
 			for (i = 0; i < newfds; i++, fdp++) {
 				_finstall(fdesc, fdep[i]->fde_file, *fdp,
-				    (flags & MSG_CMSG_CLOEXEC) != 0 ? UF_EXCLOSE : 0,
+				    (flags & MSG_CMSG_CLOEXEC) != 0 ? O_CLOEXEC : 0,
 				    &fdep[i]->fde_caps);
 				unp_externalize_fp(fdep[i]->fde_file);
 			}

@@ -708,7 +708,7 @@ its_init_cpu(device_t dev, struct gicv3_its_softc *sc)
 		return (0);
 
 	/* Check if the ITS is enabled on this CPU */
-	if ((gic_r_read_4(gicv3, GICR_TYPER) & GICR_TYPER_PLPIS) == 0)
+	if ((gic_r_read_8(gicv3, GICR_TYPER) & GICR_TYPER_PLPIS) == 0)
 		return (ENXIO);
 
 	rpcpu = gicv3_get_redist(dev);
@@ -1110,7 +1110,8 @@ its_get_devid(device_t pci_dev)
 	uintptr_t id;
 
 	if (pci_get_id(pci_dev, PCI_ID_MSI, &id) != 0)
-		panic("its_get_devid: Unable to get the MSI DeviceID");
+		panic("%s: %s: Unable to get the MSI DeviceID", __func__,
+		    device_get_nameunit(pci_dev));
 
 	return (id);
 }

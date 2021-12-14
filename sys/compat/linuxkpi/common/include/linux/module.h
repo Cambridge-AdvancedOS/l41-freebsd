@@ -37,6 +37,7 @@
 
 #include <linux/list.h>
 #include <linux/compiler.h>
+#include <linux/stringify.h>
 #include <linux/kmod.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
@@ -49,6 +50,7 @@
 #define MODULE_LICENSE(name)
 #define	MODULE_INFO(tag, info)
 #define	MODULE_FIRMWARE(firmware)
+#define	MODULE_SUPPORTED_DEVICE(name)
 
 #define	THIS_MODULE	((struct module *)0)
 

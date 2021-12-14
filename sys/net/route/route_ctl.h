@@ -62,6 +62,10 @@ int rib_add_redirect(u_int fibnum, struct sockaddr *dst,
   struct sockaddr *gateway, struct sockaddr *author, struct ifnet *ifp,
   int flags, int expire_sec);
 
+/* common flags for the functions below */
+#define	RIB_FLAG_WLOCK		0x01	/* Need exclusive rnh lock */
+#define	RIB_FLAG_LOCKED		0x02	/* Do not explicitly acquire rnh lock */
+
 enum rib_walk_hook {
 	RIB_WALK_HOOK_PRE,	/* Hook is called before iteration */
 	RIB_WALK_HOOK_POST,	/* Hook is called after iteration */
@@ -77,6 +81,8 @@ void rib_walk_ext_internal(struct rib_head *rnh, bool wlock,
     rib_walktree_f_t *wa_f, rib_walk_hook_f_t *hook_f, void *arg);
 void rib_walk_ext_locked(struct rib_head *rnh, rib_walktree_f_t *wa_f,
     rib_walk_hook_f_t *hook_f, void *arg);
+void rib_walk_from(uint32_t fibnum, int family, uint32_t flags, struct sockaddr *prefix,
+    struct sockaddr *mask, rib_walktree_f_t *wa_f, void *arg);
 
 void rib_walk_del(u_int fibnum, int family, rib_filter_f_t *filter_f,
     void *arg, bool report);
@@ -111,6 +117,7 @@ void rt_get_inet_prefix_plen(const struct rtentry *rt, struct in_addr *paddr,
     int *plen, uint32_t *pscopeid);
 void rt_get_inet_prefix_pmask(const struct rtentry *rt, struct in_addr *paddr,
     struct in_addr *pmask, uint32_t *pscopeid);
+struct rtentry *rt_get_inet_parent(uint32_t fibnum, struct in_addr addr, int plen);
 #endif
 #ifdef INET6
 struct in6_addr;
@@ -118,6 +125,8 @@ void rt_get_inet6_prefix_plen(const struct rtentry *rt, struct in6_addr *paddr,
     int *plen, uint32_t *pscopeid);
 void rt_get_inet6_prefix_pmask(const struct rtentry *rt, struct in6_addr *paddr,
     struct in6_addr *pmask, uint32_t *pscopeid);
+struct rtentry *rt_get_inet6_parent(uint32_t fibnum, const struct in6_addr *paddr,
+    int plen);
 #endif
 
 /* Nexthops */
@@ -148,7 +157,7 @@ struct rib_subscription *rib_subscribe_internal(struct rib_head *rnh,
     bool waitok);
 struct rib_subscription *rib_subscribe_locked(struct rib_head *rnh,
     rib_subscription_cb_t *f, void *arg, enum rib_subscription_type type);
-void rib_unsibscribe(struct rib_subscription *rs);
-void rib_unsibscribe_locked(struct rib_subscription *rs);
+void rib_unsubscribe(struct rib_subscription *rs);
+void rib_unsubscribe_locked(struct rib_subscription *rs);
 
 #endif

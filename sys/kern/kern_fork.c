@@ -313,8 +313,13 @@ fork_norfproc(struct thread *td, int flags)
 	    ("fork_norfproc called with RFPROC set"));
 	p1 = td->td_proc;
 
-	if (((p1->p_flag & (P_HADTHREADS|P_SYSTEM)) == P_HADTHREADS) &&
-	    (flags & (RFCFDG | RFFDG))) {
+	/*
+	 * Quiesce other threads if necessary.  If RFMEM is not specified we
+	 * must ensure that other threads do not concurrently create a second
+	 * process sharing the vmspace, see vmspace_unshare().
+	 */
+	if ((p1->p_flag & (P_HADTHREADS | P_SYSTEM)) == P_HADTHREADS &&
+	    ((flags & (RFCFDG | RFFDG)) != 0 || (flags & RFMEM) == 0)) {
 		PROC_LOCK(p1);
 		if (thread_single(p1, SINGLE_BOUNDARY)) {
 			PROC_UNLOCK(p1);
@@ -350,8 +355,8 @@ fork_norfproc(struct thread *td, int flags)
 	}
 
 fail:
-	if (((p1->p_flag & (P_HADTHREADS|P_SYSTEM)) == P_HADTHREADS) &&
-	    (flags & (RFCFDG | RFFDG))) {
+	if ((p1->p_flag & (P_HADTHREADS | P_SYSTEM)) == P_HADTHREADS &&
+	    ((flags & (RFCFDG | RFFDG)) != 0 || (flags & RFMEM) == 0)) {
 		PROC_LOCK(p1);
 		thread_single_end(p1, SINGLE_BOUNDARY);
 		PROC_UNLOCK(p1);
@@ -487,7 +492,8 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	p2->p_flag2 = p1->p_flag2 & (P2_ASLR_DISABLE | P2_ASLR_ENABLE |
 	    P2_ASLR_IGNSTART | P2_NOTRACE | P2_NOTRACE_EXEC |
 	    P2_PROTMAX_ENABLE | P2_PROTMAX_DISABLE | P2_TRAPCAP |
-	    P2_STKGAP_DISABLE | P2_STKGAP_DISABLE_EXEC);
+	    P2_STKGAP_DISABLE | P2_STKGAP_DISABLE_EXEC | P2_NO_NEW_PRIVS |
+	    P2_WXORX_DISABLE | P2_WXORX_ENABLE_EXEC);
 	p2->p_swtick = ticks;
 	if (p1->p_flag & P_PROFIL)
 		startprofclock(p2);
@@ -497,9 +503,12 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	} else {
 		sigacts_copy(newsigacts, p1->p_sigacts);
 		p2->p_sigacts = newsigacts;
-		if ((fr->fr_flags2 & FR2_DROPSIG_CAUGHT) != 0) {
+		if ((fr->fr_flags2 & (FR2_DROPSIG_CAUGHT | FR2_KPROC)) != 0) {
 			mtx_lock(&p2->p_sigacts->ps_mtx);
-			sig_drop_caught(p2);
+			if ((fr->fr_flags2 & FR2_DROPSIG_CAUGHT) != 0)
+				sig_drop_caught(p2);
+			if ((fr->fr_flags2 & FR2_KPROC) != 0)
+				p2->p_sigacts->ps_flag |= PS_NOCLDWAIT;
 			mtx_unlock(&p2->p_sigacts->ps_mtx);
 		}
 	}
@@ -511,7 +520,13 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	else
 	        p2->p_sigparent = SIGCHLD;
 
+	if ((fr->fr_flags2 & FR2_KPROC) != 0) {
+		p2->p_flag |= P_SYSTEM | P_KPROC;
+		td2->td_pflags |= TDP_KTHREAD;
+	}
+
 	p2->p_textvp = p1->p_textvp;
+	p2->p_textdvp = p1->p_textdvp;
 	p2->p_fd = fd;
 	p2->p_fdtol = fdtol;
 	p2->p_pd = pd;
@@ -533,9 +548,16 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	PROC_UNLOCK(p1);
 	PROC_UNLOCK(p2);
 
-	/* Bump references to the text vnode (for procfs). */
-	if (p2->p_textvp)
+	/*
+	 * Bump references to the text vnode and directory, and copy
+	 * the hardlink name.
+	 */
+	if (p2->p_textvp != NULL)
 		vrefact(p2->p_textvp);
+	if (p2->p_textdvp != NULL)
+		vrefact(p2->p_textdvp);
+	p2->p_binname = p1->p_binname == NULL ? NULL :
+	    strdup(p1->p_binname, M_PARGS);
 
 	/*
 	 * Set up linkage for kernel based threading.
@@ -598,6 +620,7 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	LIST_INIT(&p2->p_orphans);
 
 	callout_init_mtx(&p2->p_itcallout, &p2->p_mtx, 0);
+	TAILQ_INIT(&p2->p_kqtim_stop);
 
 	/*
 	 * This begins the section where we must prevent the parent

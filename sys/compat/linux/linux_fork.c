@@ -45,7 +45,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/sched.h>
 #include <sys/syscallsubr.h>
 #include <sys/sx.h>
-#include <sys/umtx.h>
 #include <sys/unistd.h>
 #include <sys/wait.h>
 
@@ -205,7 +204,7 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 	 * stack. This is what normal fork() does, so we just keep tf_rsp arg
 	 * intact.
 	 */
-	linux_set_upcall_kse(td2, PTROUT(args->stack));
+	linux_set_upcall(td2, PTROUT(args->stack));
 
 	if (args->flags & LINUX_CLONE_SETTLS)
 		linux_set_cloned_tls(td2, args->tls);
@@ -304,7 +303,7 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 
 	cpu_thread_clean(newtd);
 
-	linux_set_upcall_kse(newtd, PTROUT(args->stack));
+	linux_set_upcall(newtd, PTROUT(args->stack));
 
 	PROC_LOCK(p);
 	p->p_flag |= P_HADTHREADS;
@@ -375,8 +374,6 @@ linux_exit(struct thread *td, struct linux_exit_args *args)
 	KASSERT(em != NULL, ("exit: emuldata not found.\n"));
 
 	LINUX_CTR2(exit, "thread(%d) (%d)", em->em_tid, args->rval);
-
-	umtx_thread_exit(td);
 
 	linux_thread_detach(td);
 

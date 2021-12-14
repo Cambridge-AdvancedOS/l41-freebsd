@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2020  Mark Nudelman
+ * Copyright (C) 1984-2021  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -894,6 +894,43 @@ v560  5/3/20    Fix regression when command results in no movement;
 v561  5/11/20   Fix erroneous EOF calculation when F command is interrupted.
 v562  5/19/20   Update Unicode tables; minor doc formatting.
 v563  6/13/20   Fix crash due to realpath() incompatibility.
+v564  8/25/20   Handle realpath consistently; update docs.
+v565  11/3/20   Add ESC-U command, optimize calls to realpath().
+v566  11/25/20  Fix crash when reopening a file while using LESSOPEN;
+                support OSC 8 hyperlinks.
+v567  11/25/20  Fix typo.
+v568  11/29/20  Fix some hyperlink bugs; add ^W search modifier
+                (thanks to Arminius); allow Makefile.aut to use Python 
+                instead of Perl (thanks to Charlie Lin).
+v569  12/1/20   Allow multiple & filters (thanks to Mattias Johansson),
+                allow ^X to exit F command.
+v570  12/12/20  Better handling of multiple + or -p options;
+                fix bugs in horizontal scrolling.
+v571  12/30/20  Add --line-num-width and --status-col-width options.
+v572  1/4/21    Save lastmark in history file; don't toggle mouse reporting;
+                implement termcap delays.
+v573  1/9/21    Limit eof bell to 1 per second.
+v574  1/13/21   Add incremental search.
+v575  1/17/21   Fix build without HILITE_SEARCH;
+                fix bug with ^K in lesskey extra string.
+v576  2/4/21    Make sure search result is visible; add --use-color and --color.
+v577  2/9/21    Use ttyname to get name of tty device.
+v578  2/9/21    Doc
+v579  2/14/21   Fix double-width char bugs and non-match search crash.
+v580  3/2/21    Some color fixes; fix compiler warnings; some lesstest support.
+v581  4/6/21    Ignore SIGTSTP in secure mode; don't print "skipping" when filtering.
+v582  4/21/21   Less now reads lesskey source file rather than binary;
+                fix bug in finding tags with backslashes.
+v583  4/21/21   Use XDG_CONFIG_HOME and XDG_DATA_HOME to find files.
+v584  4/30/21   Add --file-size option.
+v585  5/2/21    Allow color desc W per man page.
+v586  5/7/21    Doc changes.
+v587  5/27/21   Fix --with-secure; fix --file-size message on Windows; 
+                fix colored search hilite in colored text; don't exit
+                if -F and screen is resized; fix memcpy usage.
+v588  5/27/21   Fix release.
+v589  5/29/21   Copyright & build changes.
+v590  6/3/21    Fix non-autoconf Makefiles.
 */
 
-char version[] = "563";
+char version[] = "590";

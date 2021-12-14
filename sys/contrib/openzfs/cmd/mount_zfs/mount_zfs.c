@@ -50,6 +50,21 @@ libzfs_handle_t *g_zfs;
 static void
 parse_dataset(const char *target, char **dataset)
 {
+	/*
+	 * Prior to util-linux 2.36.2, if a file or directory in the
+	 * current working directory was named 'dataset' then mount(8)
+	 * would prepend the current working directory to the dataset.
+	 * Check for it and strip the prepended path when it is added.
+	 */
+	char cwd[PATH_MAX];
+	if (getcwd(cwd, PATH_MAX) == NULL) {
+		perror("getcwd");
+		return;
+	}
+	int len = strlen(cwd);
+	if (strncmp(cwd, target, len) == 0)
+		target += len;
+
 	/* Assume pool/dataset is more likely */
 	strlcpy(*dataset, target, PATH_MAX);
 
@@ -170,10 +185,11 @@ main(int argc, char **argv)
 			break;
 		case 'h':
 		case '?':
-			(void) fprintf(stderr, gettext("Invalid option '%c'\n"),
-			    optopt);
+			if (optopt)
+				(void) fprintf(stderr,
+				    gettext("Invalid option '%c'\n"), optopt);
 			(void) fprintf(stderr, gettext("Usage: mount.zfs "
-			    "[-sfnv] [-o options] <dataset> <mountpoint>\n"));
+			    "[-sfnvh] [-o options] <dataset> <mountpoint>\n"));
 			return (MOUNT_USAGE);
 		}
 	}

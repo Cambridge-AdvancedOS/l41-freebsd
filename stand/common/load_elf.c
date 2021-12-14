@@ -39,6 +39,7 @@ __FBSDID("$FreeBSD$");
 #include <stand.h>
 #define FREEBSD_ELF
 #include <sys/link_elf.h>
+#include <gfx_fb.h>
 
 #include "bootstrap.h"
 
@@ -84,11 +85,13 @@ typedef struct elf_file {
 
 static int __elfN(loadimage)(struct preloaded_file *mp, elf_file_t ef,
     uint64_t loadaddr);
-static int __elfN(lookup_symbol)(struct preloaded_file *mp, elf_file_t ef,
-    const char* name, Elf_Sym* sym);
+static int __elfN(lookup_symbol)(elf_file_t ef, const char* name,
+    Elf_Sym *sym, unsigned char type);
 static int __elfN(reloc_ptr)(struct preloaded_file *mp, elf_file_t ef,
     Elf_Addr p, void *val, size_t len);
 static int __elfN(parse_modmetadata)(struct preloaded_file *mp, elf_file_t ef,
+    Elf_Addr p_start, Elf_Addr p_end);
+static bool __elfN(parse_vt_drv_set)(struct preloaded_file *mp, elf_file_t ef,
     Elf_Addr p_start, Elf_Addr p_end);
 static symaddr_fn __elfN(symaddr);
 static char	*fake_modname(const char *name);
@@ -203,6 +206,18 @@ static int elf_section_header_convert(const Elf_Ehdr *ehdr, Elf_Shdr *shdr)
 }
 #undef CONVERT_SWITCH
 #undef CONVERT_FIELD
+
+
+#ifdef __amd64__
+static bool
+is_kernphys_relocatable(elf_file_t ef)
+{
+	Elf_Sym sym;
+
+	return (__elfN(lookup_symbol)(ef, "kernphys", &sym, STT_OBJECT) == 0 &&
+	    sym.st_size == 8);
+}
+#endif
 
 static int
 __elfN(load_elf_header)(char *filename, elf_file_t ef)
@@ -431,6 +446,9 @@ __elfN(loadfile_raw)(char *filename, uint64_t dest,
 	/* Load OK, return module pointer */
 	*result = (struct preloaded_file *)fp;
 	err = 0;
+#ifdef __amd64__
+	fp->f_kernphys_relocatable = multiboot || is_kernphys_relocatable(&ef);
+#endif
 	goto out;
 
 ioerr:
@@ -732,13 +750,6 @@ __elfN(loadimage)(struct preloaded_file *fp, elf_file_t ef, uint64_t off)
 		}
 #endif
 		size = shdr[i].sh_size;
-#if defined(__powerpc__)
-  #if __ELF_WORD_SIZE == 64
-		size = htobe64(size);
-  #else
-		size = htobe32(size);
-  #endif
-#endif
 
 		archsw.arch_copyin(&size, lastaddr, sizeof(size));
 		lastaddr += sizeof(size);
@@ -782,17 +793,6 @@ __elfN(loadimage)(struct preloaded_file *fp, elf_file_t ef, uint64_t off)
 	esym = lastaddr;
 #ifndef ELF_VERBOSE
 	printf("]");
-#endif
-
-#if defined(__powerpc__)
-  /* On PowerPC we always need to provide BE data to the kernel */
-  #if __ELF_WORD_SIZE == 64
-	ssym = htobe64((uint64_t)ssym);
-	esym = htobe64((uint64_t)esym);
-  #else
-	ssym = htobe32((uint32_t)ssym);
-	esym = htobe32((uint32_t)esym);
-  #endif
 #endif
 
 	file_addmetadata(fp, MODINFOMD_SSYM, sizeof(ssym), &ssym);
@@ -872,13 +872,25 @@ nosyms:
 	ef->buckets = ef->hashtab + 2;
 	ef->chains = ef->buckets + ef->nbuckets;
 
-	if (__elfN(lookup_symbol)(fp, ef, "__start_set_modmetadata_set",
-	    &sym) != 0)
+	if (!gfx_state.tg_kernel_supported &&
+	    __elfN(lookup_symbol)(ef, "__start_set_vt_drv_set", &sym,
+	    STT_NOTYPE) == 0) {
+		p_start = sym.st_value + ef->off;
+		if (__elfN(lookup_symbol)(ef, "__stop_set_vt_drv_set", &sym,
+		    STT_NOTYPE) == 0) {
+			p_end = sym.st_value + ef->off;
+			gfx_state.tg_kernel_supported =
+			    __elfN(parse_vt_drv_set)(fp, ef, p_start, p_end);
+		}
+	}
+
+	if (__elfN(lookup_symbol)(ef, "__start_set_modmetadata_set", &sym,
+	    STT_NOTYPE) != 0)
 		return 0;
 	p_start = sym.st_value + ef->off;
-	if (__elfN(lookup_symbol)(fp, ef, "__stop_set_modmetadata_set",
-	    &sym) != 0)
-		return ENOENT;
+	if (__elfN(lookup_symbol)(ef, "__stop_set_modmetadata_set", &sym,
+	    STT_NOTYPE) != 0)
+		return 0;
 	p_end = sym.st_value + ef->off;
 
 	if (__elfN(parse_modmetadata)(fp, ef, p_start, p_end) == 0)
@@ -1072,6 +1084,36 @@ out:
 	return (err);
 }
 
+/*
+ * Walk through vt_drv_set, each vt driver structure starts with
+ * static 16 chars for driver name. If we have "vbefb", return true.
+ */
+static bool
+__elfN(parse_vt_drv_set)(struct preloaded_file *fp, elf_file_t ef,
+    Elf_Addr p_start, Elf_Addr p_end)
+{
+	Elf_Addr v, p;
+	char vd_name[16];
+	int error;
+
+	p = p_start;
+	while (p < p_end) {
+		COPYOUT(p, &v, sizeof(v));
+
+		error = __elfN(reloc_ptr)(fp, ef, p, &v, sizeof(v));
+		if (error == EOPNOTSUPP)
+			v += ef->off;
+		else if (error != 0)
+			return (false);
+		COPYOUT(v, &vd_name, sizeof(vd_name));
+		if (strncmp(vd_name, "vbefb", sizeof(vd_name)) == 0)
+			return (true);
+		p += sizeof(Elf_Addr);
+	}
+
+	return (false);
+}
+
 int
 __elfN(parse_modmetadata)(struct preloaded_file *fp, elf_file_t ef,
     Elf_Addr p_start, Elf_Addr p_end)
@@ -1185,13 +1227,18 @@ elf_hash(const char *name)
 static const char __elfN(bad_symtable)[] = "elf" __XSTRING(__ELF_WORD_SIZE)
     "_lookup_symbol: corrupt symbol table\n";
 int
-__elfN(lookup_symbol)(struct preloaded_file *fp, elf_file_t ef,
-    const char* name, Elf_Sym *symp)
+__elfN(lookup_symbol)(elf_file_t ef, const char* name, Elf_Sym *symp,
+    unsigned char type)
 {
 	Elf_Hashelt symnum;
 	Elf_Sym sym;
 	char *strp;
 	unsigned long hash;
+
+	if (ef->nbuckets == 0) {
+		printf(__elfN(bad_symtable));
+		return ENOENT;
+	}
 
 	hash = elf_hash(name);
 	COPYOUT(&ef->buckets[hash % ef->nbuckets], &symnum, sizeof(symnum));
@@ -1213,7 +1260,7 @@ __elfN(lookup_symbol)(struct preloaded_file *fp, elf_file_t ef,
 			free(strp);
 			if (sym.st_shndx != SHN_UNDEF ||
 			    (sym.st_value != 0 &&
-			    ELF_ST_TYPE(sym.st_info) == STT_FUNC)) {
+			    ELF_ST_TYPE(sym.st_info) == type)) {
 				*symp = sym;
 				return 0;
 			}

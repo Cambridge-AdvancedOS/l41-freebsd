@@ -475,7 +475,6 @@ sodealloc(struct socket *so)
 #endif
 	hhook_run_socket(so, NULL, HHOOK_SOCKET_CLOSE);
 
-	crfree(so->so_cred);
 	khelp_destroy_osd(&so->osd);
 	if (SOLISTENING(so)) {
 		if (so->sol_accept_filter != NULL)
@@ -492,6 +491,7 @@ sodealloc(struct socket *so)
 		SOCKBUF_LOCK_DESTROY(&so->so_snd);
 		SOCKBUF_LOCK_DESTROY(&so->so_rcv);
 	}
+	crfree(so->so_cred);
 	mtx_destroy(&so->so_lock);
 	uma_zfree(socket_zone, so);
 }
@@ -718,6 +718,7 @@ sonewconn(struct socket *head, int connstatus)
 	}
 	so->so_listen = head;
 	so->so_type = head->so_type;
+	so->so_options = head->so_options & ~SO_ACCEPTCONN;
 	so->so_linger = head->so_linger;
 	so->so_state = head->so_state | SS_NOFDREF;
 	so->so_fibnum = head->so_fibnum;
@@ -754,7 +755,6 @@ sonewconn(struct socket *head, int connstatus)
 	if (head->sol_accept_filter != NULL)
 		connstatus = 0;
 	so->so_state |= connstatus;
-	so->so_options = head->so_options & ~SO_ACCEPTCONN;
 	soref(head); /* A socket on (in)complete queue refs head. */
 	if (connstatus) {
 		TAILQ_INSERT_TAIL(&head->sol_comp, so, so_list);
@@ -1011,7 +1011,7 @@ solisten_dequeue(struct socket *head, struct socket **ret, int flags)
 
 	while (!(head->so_state & SS_NBIO) && TAILQ_EMPTY(&head->sol_comp) &&
 	    head->so_error == 0) {
-		error = msleep(&head->sol_comp, &head->so_lock, PSOCK | PCATCH,
+		error = msleep(&head->sol_comp, SOCK_MTX(head), PSOCK | PCATCH,
 		    "accept", 0);
 		if (error != 0) {
 			SOLISTEN_UNLOCK(head);
@@ -1073,11 +1073,12 @@ void
 sofree(struct socket *so)
 {
 	struct protosw *pr = so->so_proto;
+	bool last __diagused;
 
 	SOCK_LOCK_ASSERT(so);
 
-	if ((so->so_state & SS_NOFDREF) == 0 || so->so_count != 0 ||
-	    (so->so_state & SS_PROTOREF) || (so->so_qstate == SQ_COMP)) {
+	if ((so->so_state & (SS_NOFDREF | SS_PROTOREF)) != SS_NOFDREF ||
+	    refcount_load(&so->so_count) != 0 || so->so_qstate == SQ_COMP) {
 		SOCK_UNLOCK(so);
 		return;
 	}
@@ -1113,8 +1114,9 @@ sofree(struct socket *so)
 			    __func__, so, sol));
 			TAILQ_REMOVE(&sol->sol_incomp, so, so_list);
 			sol->sol_incqlen--;
-			/* This is guarenteed not to be the last. */
-			refcount_release(&sol->so_count);
+			last = refcount_release(&sol->so_count);
+			KASSERT(!last, ("%s: released last reference for %p",
+			    __func__, sol));
 			so->so_qstate = SQ_NONE;
 			so->so_listen = NULL;
 		} else
@@ -1122,7 +1124,7 @@ sofree(struct socket *so)
 			    ("%s: so %p not on (in)comp with so_listen",
 			    __func__, so));
 		sorele(sol);
-		KASSERT(so->so_count == 1,
+		KASSERT(refcount_load(&so->so_count) == 1,
 		    ("%s: so %p count %u", __func__, so, so->so_count));
 		so->so_count = 0;
 	}
@@ -1176,8 +1178,9 @@ int
 soclose(struct socket *so)
 {
 	struct accept_queue lqueue;
-	bool listening;
+	struct socket *sp, *tsp;
 	int error = 0;
+	bool last __diagused;
 
 	KASSERT(!(so->so_state & SS_NOFDREF), ("soclose: SS_NOFDREF on enter"));
 
@@ -1211,11 +1214,9 @@ drop:
 	if (so->so_proto->pr_usrreqs->pru_close != NULL)
 		(*so->so_proto->pr_usrreqs->pru_close)(so);
 
+	TAILQ_INIT(&lqueue);
 	SOCK_LOCK(so);
-	if ((listening = (so->so_options & SO_ACCEPTCONN))) {
-		struct socket *sp;
-
-		TAILQ_INIT(&lqueue);
+	if (SOLISTENING(so)) {
 		TAILQ_SWAP(&lqueue, &so->sol_incomp, socket, so_list);
 		TAILQ_CONCAT(&lqueue, &so->sol_comp, so_list);
 
@@ -1226,24 +1227,22 @@ drop:
 			sp->so_qstate = SQ_NONE;
 			sp->so_listen = NULL;
 			SOCK_UNLOCK(sp);
-			/* Guaranteed not to be the last. */
-			refcount_release(&so->so_count);
+			last = refcount_release(&so->so_count);
+			KASSERT(!last, ("%s: released last reference for %p",
+			    __func__, so));
 		}
 	}
 	KASSERT((so->so_state & SS_NOFDREF) == 0, ("soclose: NOFDREF"));
 	so->so_state |= SS_NOFDREF;
 	sorele(so);
-	if (listening) {
-		struct socket *sp, *tsp;
-
-		TAILQ_FOREACH_SAFE(sp, &lqueue, so_list, tsp) {
-			SOCK_LOCK(sp);
-			if (sp->so_count == 0) {
-				SOCK_UNLOCK(sp);
-				soabort(sp);
-			} else
-				/* sp is now in sofree() */
-				SOCK_UNLOCK(sp);
+	TAILQ_FOREACH_SAFE(sp, &lqueue, so_list, tsp) {
+		SOCK_LOCK(sp);
+		if (refcount_load(&sp->so_count) == 0) {
+			SOCK_UNLOCK(sp);
+			soabort(sp);
+		} else {
+			/* See the handling of queued sockets in sofree(). */
+			SOCK_UNLOCK(sp);
 		}
 	}
 	CURVNET_RESTORE();
@@ -1313,7 +1312,8 @@ soconnectat(int fd, struct socket *so, struct sockaddr *nam, struct thread *td)
 {
 	int error;
 
-	if (so->so_options & SO_ACCEPTCONN)
+	/* XXXMJ racy */
+	if (SOLISTENING(so))
 		return (EOPNOTSUPP);
 
 	CURVNET_SET(so->so_vnet);
@@ -1369,8 +1369,6 @@ sodisconnect(struct socket *so)
 	error = (*so->so_proto->pr_usrreqs->pru_disconnect)(so);
 	return (error);
 }
-
-#define	SBLOCKWAIT(f)	(((f) & MSG_DONTWAIT) ? 0 : SBL_WAIT)
 
 int
 sosend_dgram(struct socket *so, struct sockaddr *addr, struct uio *uio,
@@ -1583,7 +1581,7 @@ sosend_generic(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	if (control != NULL)
 		clen = control->m_len;
 
-	error = sblock(&so->so_snd, SBLOCKWAIT(flags));
+	error = SOCK_IO_SEND_LOCK(so, SBLOCKWAIT(flags));
 	if (error)
 		goto out;
 
@@ -1763,18 +1761,13 @@ restart:
 
 #ifdef KERN_TLS
 			if (tls != NULL && tls->mode == TCP_TLS_MODE_SW) {
-				/*
-				 * Note that error is intentionally
-				 * ignored.
-				 *
-				 * Like sendfile(), we rely on the
-				 * completion routine (pru_ready())
-				 * to free the mbufs in the event that
-				 * pru_send() encountered an error and
-				 * did not append them to the sockbuf.
-				 */
-				soref(so);
-				ktls_enqueue(top, so, tls_enq_cnt);
+				if (error != 0) {
+					m_freem(top);
+					top = NULL;
+				} else {
+					soref(so);
+					ktls_enqueue(top, so, tls_enq_cnt);
+				}
 			}
 #endif
 			clen = 0;
@@ -1786,7 +1779,7 @@ restart:
 	} while (resid);
 
 release:
-	sbunlock(&so->so_snd);
+	SOCK_IO_SEND_UNLOCK(so);
 out:
 #ifdef KERN_TLS
 	if (tls != NULL)
@@ -1933,7 +1926,7 @@ soreceive_generic(struct socket *so, struct sockaddr **psa, struct uio *uio,
 		(*pr->pr_usrreqs->pru_rcvd)(so, 0);
 	}
 
-	error = sblock(&so->so_rcv, SBLOCKWAIT(flags));
+	error = SOCK_IO_RECV_LOCK(so, SBLOCKWAIT(flags));
 	if (error)
 		return (error);
 
@@ -1953,12 +1946,19 @@ restart:
 		KASSERT(m != NULL || !sbavail(&so->so_rcv),
 		    ("receive: m == %p sbavail == %u",
 		    m, sbavail(&so->so_rcv)));
-		if (so->so_error) {
+		if (so->so_error || so->so_rerror) {
 			if (m != NULL)
 				goto dontblock;
-			error = so->so_error;
-			if ((flags & MSG_PEEK) == 0)
-				so->so_error = 0;
+			if (so->so_error)
+				error = so->so_error;
+			else
+				error = so->so_rerror;
+			if ((flags & MSG_PEEK) == 0) {
+				if (so->so_error)
+					so->so_error = 0;
+				else
+					so->so_rerror = 0;
+			}
 			SOCKBUF_UNLOCK(&so->so_rcv);
 			goto release;
 		}
@@ -2199,7 +2199,8 @@ dontblock:
 			SBLASTMBUFCHK(&so->so_rcv);
 			SOCKBUF_UNLOCK(&so->so_rcv);
 			if ((m->m_flags & M_EXTPG) != 0)
-				error = m_unmappedtouio(m, moff, uio, (int)len);
+				error = m_unmapped_uiomove(m, moff, uio,
+				    (int)len);
 			else
 				error = uiomove(mtod(m, char *) + moff,
 				    (int)len, uio);
@@ -2302,7 +2303,7 @@ dontblock:
 		while (flags & MSG_WAITALL && m == NULL && uio->uio_resid > 0 &&
 		    !sosendallatonce(so) && nextrecord == NULL) {
 			SOCKBUF_LOCK_ASSERT(&so->so_rcv);
-			if (so->so_error ||
+			if (so->so_error || so->so_rerror ||
 			    so->so_rcv.sb_state & SBS_CANTRCVMORE)
 				break;
 			/*
@@ -2380,7 +2381,7 @@ dontblock:
 	if (flagsp != NULL)
 		*flagsp |= flags;
 release:
-	sbunlock(&so->so_rcv);
+	SOCK_IO_RECV_UNLOCK(so);
 	return (error);
 }
 
@@ -2427,7 +2428,7 @@ soreceive_stream(struct socket *so, struct sockaddr **psa, struct uio *uio,
 #endif
 
 	/* Prevent other readers from entering the socket. */
-	error = sblock(sb, SBLOCKWAIT(flags));
+	error = SOCK_IO_RECV_LOCK(so, SBLOCKWAIT(flags));
 	if (error)
 		return (error);
 	SOCKBUF_LOCK(sb);
@@ -2435,7 +2436,7 @@ soreceive_stream(struct socket *so, struct sockaddr **psa, struct uio *uio,
 #ifdef KERN_TLS
 	if (sb->sb_tls_info != NULL) {
 		SOCKBUF_UNLOCK(sb);
-		sbunlock(sb);
+		SOCK_IO_RECV_UNLOCK(so);
 		return (soreceive_generic(so, psa, uio, mp0, controlp,
 		    flagsp));
 	}
@@ -2598,11 +2599,10 @@ deliver:
 	if ((flags & MSG_WAITALL) && uio->uio_resid > 0)
 		goto restart;
 out:
-	SOCKBUF_LOCK_ASSERT(sb);
 	SBLASTRECORDCHK(sb);
 	SBLASTMBUFCHK(sb);
 	SOCKBUF_UNLOCK(sb);
-	sbunlock(sb);
+	SOCK_IO_RECV_UNLOCK(so);
 	return (error);
 }
 
@@ -2869,6 +2869,7 @@ sorflush(struct socket *so)
 	struct sockbuf *sb = &so->so_rcv;
 	struct protosw *pr = so->so_proto;
 	struct socket aso;
+	int error;
 
 	VNET_SO_ASSERT(so);
 
@@ -2886,7 +2887,9 @@ sorflush(struct socket *so)
 	 * despite any existing socket disposition on interruptable waiting.
 	 */
 	socantrcvmore(so);
-	(void) sblock(sb, SBL_WAIT | SBL_NOINTR);
+	error = SOCK_IO_RECV_LOCK(so, SBL_WAIT | SBL_NOINTR);
+	KASSERT(error == 0, ("%s: cannot lock sock %p recv buffer",
+	    __func__, so));
 
 	/*
 	 * Invalidate/clear most of the sockbuf structure, but leave selinfo
@@ -2900,7 +2903,7 @@ sorflush(struct socket *so)
 	bzero(&sb->sb_startzero,
 	    sizeof(*sb) - offsetof(struct sockbuf, sb_startzero));
 	SOCKBUF_UNLOCK(sb);
-	sbunlock(sb);
+	SOCK_IO_RECV_UNLOCK(so);
 
 	/*
 	 * Dispose of special rights and flush the copied socket.  Don't call
@@ -3043,6 +3046,7 @@ sosetopt(struct socket *so, struct sockopt *sopt)
 		case SO_NOSIGPIPE:
 		case SO_NO_DDP:
 		case SO_NO_OFFLOAD:
+		case SO_RERROR:
 			error = sooptcopyin(sopt, &optval, sizeof optval,
 			    sizeof optval);
 			if (error)
@@ -3264,6 +3268,7 @@ sogetopt(struct socket *so, struct sockopt *sopt)
 		case SO_NOSIGPIPE:
 		case SO_NO_DDP:
 		case SO_NO_OFFLOAD:
+		case SO_RERROR:
 			optval = so->so_options & sopt->sopt_name;
 integer:
 			error = sooptcopyout(sopt, &optval, sizeof optval);
@@ -3283,8 +3288,13 @@ integer:
 
 		case SO_ERROR:
 			SOCK_LOCK(so);
-			optval = so->so_error;
-			so->so_error = 0;
+			if (so->so_error) {
+				optval = so->so_error;
+				so->so_error = 0;
+			} else {
+				optval = so->so_rerror;
+				so->so_rerror = 0;
+			}
 			SOCK_UNLOCK(so);
 			goto integer;
 
@@ -3735,7 +3745,11 @@ pru_send_notsupp(struct socket *so, int flags, struct mbuf *m,
     struct sockaddr *addr, struct mbuf *control, struct thread *td)
 {
 
-	return EOPNOTSUPP;
+	if (control != NULL)
+		m_freem(control);
+	if ((flags & PRUS_NOTREADY) == 0)
+		m_freem(m);
+	return (EOPNOTSUPP);
 }
 
 int
@@ -3833,7 +3847,7 @@ filt_soread(struct knote *kn, long hint)
 		kn->kn_flags |= EV_EOF;
 		kn->kn_fflags = so->so_error;
 		return (1);
-	} else if (so->so_error)	/* temporary udp error */
+	} else if (so->so_error || so->so_rerror)
 		return (1);
 
 	if (kn->kn_sfflags & NOTE_LOWAT) {
@@ -3964,6 +3978,7 @@ soisconnecting(struct socket *so)
 void
 soisconnected(struct socket *so)
 {
+	bool last __diagused;
 
 	SOCK_LOCK(so);
 	so->so_state &= ~(SS_ISCONNECTING|SS_ISDISCONNECTING|SS_ISCONFIRMING);
@@ -3996,8 +4011,9 @@ soisconnected(struct socket *so)
 				sorele(head);
 				return;
 			}
-			/* Not the last one, as so holds a ref. */
-			refcount_release(&head->so_count);
+			last = refcount_release(&head->so_count);
+			KASSERT(!last, ("%s: released last reference for %p",
+			    __func__, head));
 		}
 again:
 		if ((so->so_options & SO_ACCEPTFILTER) == 0) {
@@ -4078,6 +4094,39 @@ soisdisconnected(struct socket *so)
 	} else
 		SOCK_UNLOCK(so);
 	wakeup(&so->so_timeo);
+}
+
+int
+soiolock(struct socket *so, struct sx *sx, int flags)
+{
+	int error;
+
+	KASSERT((flags & SBL_VALID) == flags,
+	    ("soiolock: invalid flags %#x", flags));
+
+	if ((flags & SBL_WAIT) != 0) {
+		if ((flags & SBL_NOINTR) != 0) {
+			sx_xlock(sx);
+		} else {
+			error = sx_xlock_sig(sx);
+			if (error != 0)
+				return (error);
+		}
+	} else if (!sx_try_xlock(sx)) {
+		return (EWOULDBLOCK);
+	}
+
+	if (__predict_false(SOLISTENING(so))) {
+		sx_xunlock(sx);
+		return (ENOTCONN);
+	}
+	return (0);
+}
+
+void
+soiounlock(struct sx *sx)
+{
+	sx_xunlock(sx);
 }
 
 /*

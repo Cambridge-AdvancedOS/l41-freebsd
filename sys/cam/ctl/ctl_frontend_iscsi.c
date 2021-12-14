@@ -557,9 +557,9 @@ cfiscsi_pdu_handle_scsi_command(struct icl_pdu *request)
 	io->scsiio.cdb_len = sizeof(bhssc->bhssc_cdb); /* Which is 16. */
 	memcpy(io->scsiio.cdb, bhssc->bhssc_cdb, sizeof(bhssc->bhssc_cdb));
 	refcount_acquire(&cs->cs_outstanding_ctl_pdus);
-	error = ctl_queue(io);
+	error = ctl_run(io);
 	if (error != CTL_RETVAL_COMPLETE) {
-		CFISCSI_SESSION_WARN(cs, "ctl_queue() failed; error %d; "
+		CFISCSI_SESSION_WARN(cs, "ctl_run() failed; error %d; "
 		    "dropping connection", error);
 		ctl_free_io(io);
 		refcount_release(&cs->cs_outstanding_ctl_pdus);
@@ -679,9 +679,9 @@ cfiscsi_pdu_handle_task_request(struct icl_pdu *request)
 	}
 
 	refcount_acquire(&cs->cs_outstanding_ctl_pdus);
-	error = ctl_queue(io);
+	error = ctl_run(io);
 	if (error != CTL_RETVAL_COMPLETE) {
-		CFISCSI_SESSION_WARN(cs, "ctl_queue() failed; error %d; "
+		CFISCSI_SESSION_WARN(cs, "ctl_run() failed; error %d; "
 		    "dropping connection", error);
 		ctl_free_io(io);
 		refcount_release(&cs->cs_outstanding_ctl_pdus);
@@ -917,7 +917,7 @@ cfiscsi_pdu_handle_data_out(struct icl_pdu *request)
 		cfiscsi_session_terminate(cs);
 		return;
 	}
-	cdw->cdw_datasn++;
+	cdw->cdw_datasn += request->ip_additional_pdus + 1;
 
 	io = cdw->cdw_ctl_io;
 	KASSERT((io->io_hdr.flags & CTL_FLAG_DATA_MASK) != CTL_FLAG_DATA_IN,
@@ -933,7 +933,7 @@ cfiscsi_pdu_handle_data_out(struct icl_pdu *request)
 		cfiscsi_data_wait_free(cs, cdw);
 		io->io_hdr.flags &= ~CTL_FLAG_DMA_INPROG;
 		if (done)
-			io->scsiio.be_move_done(io);
+			ctl_datamove_done(io, false);
 		else
 			cfiscsi_datamove_out(io);
 	}
@@ -1109,6 +1109,25 @@ cfiscsi_data_wait_free(struct cfiscsi_session *cs,
 }
 
 static void
+cfiscsi_data_wait_abort(struct cfiscsi_session *cs,
+    struct cfiscsi_data_wait *cdw, int status)
+{
+	union ctl_io *cdw_io;
+
+	/*
+	 * Set nonzero port status; this prevents backends from
+	 * assuming that the data transfer actually succeeded
+	 * and writing uninitialized data to disk.
+	 */
+	MPASS(status != 0);
+	cdw_io = cdw->cdw_ctl_io;
+	cdw_io->io_hdr.flags &= ~CTL_FLAG_DMA_INPROG;
+	cdw_io->scsiio.io_hdr.port_status = status;
+	cfiscsi_data_wait_free(cs, cdw);
+	ctl_datamove_done(cdw_io, false);
+}
+
+static void
 cfiscsi_session_terminate_tasks(struct cfiscsi_session *cs)
 {
 	struct cfiscsi_data_wait *cdw;
@@ -1128,9 +1147,9 @@ cfiscsi_session_terminate_tasks(struct cfiscsi_session *cs)
 	io->taskio.task_action = CTL_TASK_I_T_NEXUS_RESET;
 	wait = cs->cs_outstanding_ctl_pdus;
 	refcount_acquire(&cs->cs_outstanding_ctl_pdus);
-	error = ctl_queue(io);
+	error = ctl_run(io);
 	if (error != CTL_RETVAL_COMPLETE) {
-		CFISCSI_SESSION_WARN(cs, "ctl_queue() failed; error %d", error);
+		CFISCSI_SESSION_WARN(cs, "ctl_run() failed; error %d", error);
 		refcount_release(&cs->cs_outstanding_ctl_pdus);
 		ctl_free_io(io);
 	}
@@ -1139,15 +1158,7 @@ cfiscsi_session_terminate_tasks(struct cfiscsi_session *cs)
 	while ((cdw = TAILQ_FIRST(&cs->cs_waiting_for_data_out)) != NULL) {
 		TAILQ_REMOVE(&cs->cs_waiting_for_data_out, cdw, cdw_next);
 		CFISCSI_SESSION_UNLOCK(cs);
-		/*
-		 * Set nonzero port status; this prevents backends from
-		 * assuming that the data transfer actually succeeded
-		 * and writing uninitialized data to disk.
-		 */
-		cdw->cdw_ctl_io->io_hdr.flags &= ~CTL_FLAG_DMA_INPROG;
-		cdw->cdw_ctl_io->scsiio.io_hdr.port_status = 42;
-		cdw->cdw_ctl_io->scsiio.be_move_done(cdw->cdw_ctl_io);
-		cfiscsi_data_wait_free(cs, cdw);
+		cfiscsi_data_wait_abort(cs, cdw, 42);
 		CFISCSI_SESSION_LOCK(cs);
 	}
 	CFISCSI_SESSION_UNLOCK(cs);
@@ -1567,8 +1578,10 @@ cfiscsi_ioctl_handoff(struct ctl_iscsi *ci)
 	 */
 	cs->cs_cmdsn = cihp->cmdsn;
 	cs->cs_statsn = cihp->statsn;
-	cs->cs_max_recv_data_segment_length = cihp->max_recv_data_segment_length;
-	cs->cs_max_send_data_segment_length = cihp->max_send_data_segment_length;
+	cs->cs_conn->ic_max_recv_data_segment_length =
+	    cihp->max_recv_data_segment_length;
+	cs->cs_conn->ic_max_send_data_segment_length =
+	    cihp->max_send_data_segment_length;
 	cs->cs_max_burst_length = cihp->max_burst_length;
 	cs->cs_first_burst_length = cihp->first_burst_length;
 	cs->cs_immediate_data = !!cihp->immediate_data;
@@ -1733,8 +1746,8 @@ cfiscsi_ioctl_list(struct ctl_iscsi *ci)
 		    cs->cs_target->ct_tag,
 		    cs->cs_conn->ic_header_crc32c ? "CRC32C" : "None",
 		    cs->cs_conn->ic_data_crc32c ? "CRC32C" : "None",
-		    cs->cs_max_recv_data_segment_length,
-		    cs->cs_max_send_data_segment_length,
+		    cs->cs_conn->ic_max_recv_data_segment_length,
+		    cs->cs_conn->ic_max_send_data_segment_length,
 		    cs->cs_max_burst_length,
 		    cs->cs_first_burst_length,
 		    cs->cs_immediate_data,
@@ -2444,6 +2457,7 @@ cfiscsi_datamove_in(union ctl_io *io)
 	struct iscsi_bhs_data_in *bhsdi;
 	struct ctl_sg_entry ctl_sg_entry, *ctl_sglist;
 	size_t len, expected_len, sg_len, buffer_offset;
+	size_t max_send_data_segment_length;
 	const char *sg_addr;
 	icl_pdu_cb cb;
 	int ctl_sg_count, error, i;
@@ -2487,7 +2501,7 @@ cfiscsi_datamove_in(union ctl_io *io)
 		CFISCSI_SESSION_DEBUG(cs, "buffer_offset = %zd, "
 		    "already sent the expected len", buffer_offset);
 #endif
-		io->scsiio.be_move_done(io);
+		ctl_datamove_done(io, true);
 		return;
 	}
 
@@ -2501,6 +2515,11 @@ cfiscsi_datamove_in(union ctl_io *io)
 	sg_len = 0;
 	response = NULL;
 	bhsdi = NULL;
+	if (cs->cs_conn->ic_hw_isomax != 0)
+		max_send_data_segment_length = cs->cs_conn->ic_hw_isomax;
+	else
+		max_send_data_segment_length =
+		    cs->cs_conn->ic_max_send_data_segment_length;
 	for (;;) {
 		if (response == NULL) {
 			response = cfiscsi_pdu_new_response(request, M_NOWAIT);
@@ -2508,7 +2527,7 @@ cfiscsi_datamove_in(union ctl_io *io)
 				CFISCSI_SESSION_WARN(cs, "failed to "
 				    "allocate memory; dropping connection");
 				ctl_set_busy(&io->scsiio);
-				io->scsiio.be_move_done(io);
+				ctl_datamove_done(io, true);
 				cfiscsi_session_terminate(cs);
 				return;
 			}
@@ -2517,7 +2536,7 @@ cfiscsi_datamove_in(union ctl_io *io)
 			bhsdi->bhsdi_initiator_task_tag =
 			    bhssc->bhssc_initiator_task_tag;
 			bhsdi->bhsdi_target_transfer_tag = 0xffffffff;
-			bhsdi->bhsdi_datasn = htonl(PRIV_EXPDATASN(io)++);
+			bhsdi->bhsdi_datasn = htonl(PRIV_EXPDATASN(io));
 			bhsdi->bhsdi_buffer_offset = htonl(buffer_offset);
 		}
 
@@ -2533,13 +2552,11 @@ cfiscsi_datamove_in(union ctl_io *io)
 		/*
 		 * Truncate to maximum data segment length.
 		 */
-		KASSERT(response->ip_data_len < cs->cs_max_send_data_segment_length,
-		    ("ip_data_len %zd >= max_send_data_segment_length %d",
-		    response->ip_data_len, cs->cs_max_send_data_segment_length));
-		if (response->ip_data_len + len >
-		    cs->cs_max_send_data_segment_length) {
-			len = cs->cs_max_send_data_segment_length -
-			    response->ip_data_len;
+		KASSERT(response->ip_data_len < max_send_data_segment_length,
+		    ("ip_data_len %zd >= max_send_data_segment_length %zd",
+		    response->ip_data_len, max_send_data_segment_length));
+		if (response->ip_data_len + len > max_send_data_segment_length) {
+			len = max_send_data_segment_length - response->ip_data_len;
 			KASSERT(len <= sg_len, ("len %zd > sg_len %zd",
 			    len, sg_len));
 		}
@@ -2566,7 +2583,7 @@ cfiscsi_datamove_in(union ctl_io *io)
 			    "allocate memory; dropping connection");
 			icl_pdu_free(response);
 			ctl_set_busy(&io->scsiio);
-			io->scsiio.be_move_done(io);
+			ctl_datamove_done(io, true);
 			cfiscsi_session_terminate(cs);
 			return;
 		}
@@ -2598,7 +2615,7 @@ cfiscsi_datamove_in(union ctl_io *io)
 			i++;
 		}
 
-		if (response->ip_data_len == cs->cs_max_send_data_segment_length) {
+		if (response->ip_data_len == max_send_data_segment_length) {
 			/*
 			 * Can't stuff more data into the current PDU;
 			 * queue it.  Note that's not enough to check
@@ -2613,6 +2630,8 @@ cfiscsi_datamove_in(union ctl_io *io)
 				buffer_offset -= response->ip_data_len;
 				break;
 			}
+			PRIV_EXPDATASN(io) += howmany(response->ip_data_len,
+			    cs->cs_conn->ic_max_send_data_segment_length);
 			if (cb != NULL) {
 				response->ip_prv0 = io->scsiio.kern_data_ref;
 				response->ip_prv1 = io->scsiio.kern_data_arg;
@@ -2648,6 +2667,8 @@ cfiscsi_datamove_in(union ctl_io *io)
 			}
 		}
 		KASSERT(response->ip_data_len > 0, ("sending empty Data-In"));
+		PRIV_EXPDATASN(io) += howmany(response->ip_data_len,
+		    cs->cs_conn->ic_max_send_data_segment_length);
 		if (cb != NULL) {
 			response->ip_prv0 = io->scsiio.kern_data_ref;
 			response->ip_prv1 = io->scsiio.kern_data_arg;
@@ -2656,7 +2677,7 @@ cfiscsi_datamove_in(union ctl_io *io)
 		cfiscsi_pdu_queue_cb(response, cb);
 	}
 
-	io->scsiio.be_move_done(io);
+	ctl_datamove_done(io, true);
 }
 
 static void
@@ -2685,21 +2706,26 @@ cfiscsi_datamove_out(union ctl_io *io)
 	 */
 	expected_len = ntohl(bhssc->bhssc_expected_data_transfer_length);
 	if (io->scsiio.kern_rel_offset >= expected_len) {
-		io->scsiio.be_move_done(io);
+		ctl_datamove_done(io, true);
 		return;
 	}
+
 	datamove_len = MIN(io->scsiio.kern_data_len,
 	    expected_len - io->scsiio.kern_rel_offset);
 
 	target_transfer_tag =
 	    atomic_fetchadd_32(&cs->cs_target_transfer_tag, 1);
+	if (target_transfer_tag == 0xffffffff) {
+		target_transfer_tag =
+		    atomic_fetchadd_32(&cs->cs_target_transfer_tag, 1);
+	}
 	cdw = cfiscsi_data_wait_new(cs, io, bhssc->bhssc_initiator_task_tag,
 	    &target_transfer_tag);
 	if (cdw == NULL) {
 		CFISCSI_SESSION_WARN(cs, "failed to "
 		    "allocate memory; dropping connection");
 		ctl_set_busy(&io->scsiio);
-		io->scsiio.be_move_done(io);
+		ctl_datamove_done(io, true);
 		cfiscsi_session_terminate(cs);
 		return;
 	}
@@ -2746,7 +2772,7 @@ cfiscsi_datamove_out(union ctl_io *io)
 		done = cfiscsi_handle_data_segment(request, cdw);
 		if (done) {
 			cfiscsi_data_wait_free(cs, cdw);
-			io->scsiio.be_move_done(io);
+			ctl_datamove_done(io, true);
 			return;
 		}
 	}
@@ -2757,6 +2783,11 @@ cfiscsi_datamove_out(union ctl_io *io)
 	cdw->cdw_r2t_end = io->scsiio.ext_data_filled + r2t_len;
 
 	CFISCSI_SESSION_LOCK(cs);
+	if (cs->cs_terminating) {
+		CFISCSI_SESSION_UNLOCK(cs);
+		cfiscsi_data_wait_abort(cs, cdw, 44);
+		return;
+	}
 	TAILQ_INSERT_TAIL(&cs->cs_waiting_for_data_out, cdw, cdw_next);
 	CFISCSI_SESSION_UNLOCK(cs);
 
@@ -2769,7 +2800,7 @@ cfiscsi_datamove_out(union ctl_io *io)
 		CFISCSI_SESSION_WARN(cs, "failed to "
 		    "allocate memory; dropping connection");
 		ctl_set_busy(&io->scsiio);
-		io->scsiio.be_move_done(io);
+		ctl_datamove_done(io, true);
 		cfiscsi_session_terminate(cs);
 		return;
 	}
@@ -2948,10 +2979,7 @@ cfiscsi_task_management_done(union ctl_io *io)
 #endif
 			TAILQ_REMOVE(&cs->cs_waiting_for_data_out,
 			    cdw, cdw_next);
-			io->io_hdr.flags &= ~CTL_FLAG_DMA_INPROG;
-			cdw->cdw_ctl_io->scsiio.io_hdr.port_status = 43;
-			cdw->cdw_ctl_io->scsiio.be_move_done(cdw->cdw_ctl_io);
-			cfiscsi_data_wait_free(cs, cdw);
+			cfiscsi_data_wait_abort(cs, cdw, 43);
 		}
 		CFISCSI_SESSION_UNLOCK(cs);
 	}

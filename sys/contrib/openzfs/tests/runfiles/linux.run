@@ -85,18 +85,12 @@ tags = ['functional', 'cli_root', 'zpool_split']
 tests = ['compress_004_pos']
 tags = ['functional', 'compression']
 
-[tests/functional/deadman:Linux]
-tests = ['deadman_sync', 'deadman_zio']
-pre =
-post =
-tags = ['functional', 'deadman']
-
 [tests/functional/devices:Linux]
 tests = ['devices_001_pos', 'devices_002_neg', 'devices_003_pos']
 tags = ['functional', 'devices']
 
 [tests/functional/events:Linux]
-tests = ['events_001_pos', 'events_002_pos', 'zed_rc_filter']
+tests = ['events_001_pos', 'events_002_pos', 'zed_rc_filter', 'zed_fd_spill']
 tags = ['functional', 'events']
 
 [tests/functional/fallocate:Linux]
@@ -104,10 +98,11 @@ tests = ['fallocate_prealloc', 'fallocate_punch-hole']
 tags = ['functional', 'fallocate']
 
 [tests/functional/fault:Linux]
-tests = ['auto_offline_001_pos', 'auto_online_001_pos', 'auto_replace_001_pos',
-    'auto_spare_001_pos', 'auto_spare_002_pos', 'auto_spare_multiple',
-    'auto_spare_ashift', 'auto_spare_shared', 'decrypt_fault',
-    'decompress_fault', 'scrub_after_resilver', 'zpool_status_-s']
+tests = ['auto_offline_001_pos', 'auto_online_001_pos', 'auto_online_002_pos',
+    'auto_replace_001_pos', 'auto_spare_001_pos', 'auto_spare_002_pos',
+    'auto_spare_multiple', 'auto_spare_ashift', 'auto_spare_shared',
+    'decrypt_fault', 'decompress_fault', 'scrub_after_resilver',
+    'zpool_status_-s']
 tags = ['functional', 'fault']
 
 [tests/functional/features/large_dnode:Linux]
@@ -115,7 +110,7 @@ tests = ['large_dnode_002_pos', 'large_dnode_006_pos', 'large_dnode_008_pos']
 tags = ['functional', 'features', 'large_dnode']
 
 [tests/functional/io:Linux]
-tests = ['libaio']
+tests = ['libaio', 'io_uring']
 tags = ['functional', 'io']
 
 [tests/functional/mmap:Linux]

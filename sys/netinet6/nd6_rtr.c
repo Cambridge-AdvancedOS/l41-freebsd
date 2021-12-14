@@ -61,7 +61,6 @@ __FBSDID("$FreeBSD$");
 #include <net/route.h>
 #include <net/route/nhop.h>
 #include <net/route/route_ctl.h>
-#include <net/route/route_var.h>
 #include <net/radix.h>
 #include <net/vnet.h>
 
@@ -698,12 +697,11 @@ defrouter_addreq(struct nd_defrouter *new)
 
 	NET_EPOCH_ASSERT();
 	error = rib_action(fibnum, RTM_ADD, &info, &rc);
-	if (rc.rc_rt != NULL) {
-		struct nhop_object *nh = nhop_select(rc.rc_nh_new, 0);
+	if (error == 0) {
+		struct nhop_object *nh = nhop_select_func(rc.rc_nh_new, 0);
 		rt_routemsg(RTM_ADD, rc.rc_rt, nh, fibnum);
-	}
-	if (error == 0)
 		new->installed = 1;
+	}
 }
 
 /*
@@ -719,6 +717,7 @@ defrouter_delreq(struct nd_defrouter *dr)
 	struct rib_cmd_info rc;
 	struct epoch_tracker et;
 	unsigned int fibnum;
+	int error;
 
 	bzero(&def, sizeof(def));
 	bzero(&mask, sizeof(mask));
@@ -737,9 +736,9 @@ defrouter_delreq(struct nd_defrouter *dr)
 	info.rti_info[RTAX_NETMASK] = (struct sockaddr *)&mask;
 
 	NET_EPOCH_ENTER(et);
-	rib_action(fibnum, RTM_DELETE, &info, &rc);
-	if (rc.rc_rt != NULL) {
-		struct nhop_object *nh = nhop_select(rc.rc_nh_old, 0);
+	error = rib_action(fibnum, RTM_DELETE, &info, &rc);
+	if (error == 0) {
+		struct nhop_object *nh = nhop_select_func(rc.rc_nh_old, 0);
 		rt_routemsg(RTM_DELETE, rc.rc_rt, nh, fibnum);
 	}
 	NET_EPOCH_EXIT(et);
@@ -973,7 +972,7 @@ defrouter_select_fib(int fibnum)
 	TAILQ_FOREACH(dr, &V_nd6_defrouter, dr_entry) {
 		NET_EPOCH_ENTER(et);
 		if (selected_dr == NULL && dr->ifp->if_fib == fibnum &&
-		    (ln = nd6_lookup(&dr->rtaddr, 0, dr->ifp)) &&
+		    (ln = nd6_lookup(&dr->rtaddr, LLE_SF(AF_INET6, 0), dr->ifp)) &&
 		    ND6_IS_LLINFO_PROBREACH(ln)) {
 			selected_dr = dr;
 			defrouter_ref(selected_dr);
@@ -1815,7 +1814,8 @@ find_pfxlist_reachable_router(struct nd_prefix *pr)
 
 	NET_EPOCH_ENTER(et);
 	LIST_FOREACH(pfxrtr, &pr->ndpr_advrtrs, pfr_entry) {
-		ln = nd6_lookup(&pfxrtr->router->rtaddr, 0, pfxrtr->router->ifp);
+		ln = nd6_lookup(&pfxrtr->router->rtaddr, LLE_SF(AF_INET6, 0),
+		    pfxrtr->router->ifp);
 		if (ln == NULL)
 			continue;
 		canreach = ND6_IS_LLINFO_PROBREACH(ln);
@@ -2166,7 +2166,6 @@ nd6_prefix_offlink(struct nd_prefix *pr)
 	int error = 0;
 	struct ifnet *ifp = pr->ndpr_ifp;
 	struct nd_prefix *opr;
-	struct sockaddr_in6 sa6;
 	char ip6buf[INET6_ADDRSTRLEN];
 	uint64_t genid;
 	int a_failure;
@@ -2241,7 +2240,8 @@ restart:
 	}
 
 	if (a_failure)
-		lltable_prefix_free(AF_INET6, (struct sockaddr *)&sa6,
+		lltable_prefix_free(AF_INET6,
+		    (struct sockaddr *)&pr->ndpr_prefix,
 		    (struct sockaddr *)&mask6, LLE_STATIC);
 
 	return (error);

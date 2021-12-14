@@ -109,6 +109,8 @@ struct vesa_edid_info {
 	uint8_t checksum;
 } __packed;
 
+extern struct vesa_edid_info *edid_info;
+
 #define	STD_TIMINGS	8
 #define	DET_TIMINGS	4
 
@@ -208,6 +210,8 @@ typedef struct teken_gfx {
 	teken_t		tg_teken;		/* Teken core */
 	teken_pos_t	tg_cursor;		/* Where cursor was drawn */
 	bool		tg_cursor_visible;
+	uint8_t		*tg_cursor_image;	/* Memory for cursor */
+	size_t		tg_cursor_size;
 	teken_pos_t	tg_tp;			/* Terminal dimensions */
 	teken_pos_t	tg_origin;		/* Point of origin in pixels */
 	uint8_t		*tg_glyph;		/* Memory for glyph */
@@ -216,6 +220,7 @@ typedef struct teken_gfx {
 	struct gen_fb	tg_fb;
 	teken_funcs_t	*tg_functions;
 	void		*tg_private;
+	bool		tg_kernel_supported;	/* Loaded kernel is supported */
 } teken_gfx_t;
 
 extern font_list_t fonts;

@@ -106,6 +106,8 @@ MALLOC_DEFINE(M_LINKER, "linker", "kernel linker");
 linker_file_t linker_kernel_file;
 
 static struct sx kld_sx;	/* kernel linker lock */
+static u_int kld_busy;
+static struct thread *kld_busy_owner;
 
 /*
  * Load counter used by clients to determine if a linker file has been
@@ -612,6 +614,8 @@ linker_make_file(const char *pathname, linker_class_t lc)
 		return (NULL);
 	lf->ctors_addr = 0;
 	lf->ctors_size = 0;
+	lf->dtors_addr = 0;
+	lf->dtors_size = 0;
 	lf->refs = 1;
 	lf->userrefs = 0;
 	lf->flags = 0;
@@ -1050,6 +1054,58 @@ linker_search_symbol_name(caddr_t value, char *buf, u_int buflen,
 	    M_WAITOK));
 }
 
+int
+linker_kldload_busy(int flags)
+{
+	int error;
+
+	MPASS((flags & ~(LINKER_UB_UNLOCK | LINKER_UB_LOCKED |
+	    LINKER_UB_PCATCH)) == 0);
+	if ((flags & LINKER_UB_LOCKED) != 0)
+		sx_assert(&kld_sx, SA_XLOCKED);
+
+	if ((flags & LINKER_UB_LOCKED) == 0)
+		sx_xlock(&kld_sx);
+	while (kld_busy > 0) {
+		if (kld_busy_owner == curthread)
+			break;
+		error = sx_sleep(&kld_busy, &kld_sx,
+		    (flags & LINKER_UB_PCATCH) != 0 ? PCATCH : 0,
+		    "kldbusy", 0);
+		if (error != 0) {
+			if ((flags & LINKER_UB_UNLOCK) != 0)
+				sx_xunlock(&kld_sx);
+			return (error);
+		}
+	}
+	kld_busy++;
+	kld_busy_owner = curthread;
+	if ((flags & LINKER_UB_UNLOCK) != 0)
+		sx_xunlock(&kld_sx);
+	return (0);
+}
+
+void
+linker_kldload_unbusy(int flags)
+{
+	MPASS((flags & ~LINKER_UB_LOCKED) == 0);
+	if ((flags & LINKER_UB_LOCKED) != 0)
+		sx_assert(&kld_sx, SA_XLOCKED);
+
+	if ((flags & LINKER_UB_LOCKED) == 0)
+		sx_xlock(&kld_sx);
+	MPASS(kld_busy > 0);
+	if (kld_busy_owner != curthread)
+		panic("linker_kldload_unbusy done by not owning thread %p",
+		    kld_busy_owner);
+	kld_busy--;
+	if (kld_busy == 0) {
+		kld_busy_owner = NULL;
+		wakeup(&kld_busy);
+	}
+	sx_xunlock(&kld_sx);
+}
+
 /*
  * Syscalls.
  */
@@ -1067,12 +1123,6 @@ kern_kldload(struct thread *td, const char *file, int *fileid)
 		return (error);
 
 	/*
-	 * It is possible that kldloaded module will attach a new ifnet,
-	 * so vnet context must be set when this ocurs.
-	 */
-	CURVNET_SET(TD_TO_VNET(td));
-
-	/*
 	 * If file does not contain a qualified name or any dot in it
 	 * (kldname.ko, or kldname.ver.ko) treat it as an interface
 	 * name.
@@ -1085,19 +1135,27 @@ kern_kldload(struct thread *td, const char *file, int *fileid)
 		modname = file;
 	}
 
-	sx_xlock(&kld_sx);
-	error = linker_load_module(kldname, modname, NULL, NULL, &lf);
-	if (error) {
+	error = linker_kldload_busy(LINKER_UB_PCATCH);
+	if (error != 0) {
 		sx_xunlock(&kld_sx);
-		goto done;
+		return (error);
 	}
-	lf->userrefs++;
-	if (fileid != NULL)
-		*fileid = lf->id;
-	sx_xunlock(&kld_sx);
 
-done:
+	/*
+	 * It is possible that kldloaded module will attach a new ifnet,
+	 * so vnet context must be set when this ocurs.
+	 */
+	CURVNET_SET(TD_TO_VNET(td));
+
+	error = linker_load_module(kldname, modname, NULL, NULL, &lf);
 	CURVNET_RESTORE();
+
+	if (error == 0) {
+		lf->userrefs++;
+		if (fileid != NULL)
+			*fileid = lf->id;
+	}
+	linker_kldload_unbusy(LINKER_UB_LOCKED);
 	return (error);
 }
 
@@ -1132,8 +1190,13 @@ kern_kldunload(struct thread *td, int fileid, int flags)
 	if ((error = priv_check(td, PRIV_KLD_UNLOAD)) != 0)
 		return (error);
 
+	error = linker_kldload_busy(LINKER_UB_PCATCH);
+	if (error != 0) {
+		sx_xunlock(&kld_sx);
+		return (error);
+	}
+
 	CURVNET_SET(TD_TO_VNET(td));
-	sx_xlock(&kld_sx);
 	lf = linker_find_file_by_id(fileid);
 	if (lf) {
 		KLD_DPF(FILE, ("kldunload: lf->userrefs=%d\n", lf->userrefs));
@@ -1153,9 +1216,8 @@ kern_kldunload(struct thread *td, int fileid, int flags)
 		}
 	} else
 		error = ENOENT;
-	sx_xunlock(&kld_sx);
-
 	CURVNET_RESTORE();
+	linker_kldload_unbusy(LINKER_UB_LOCKED);
 	return (error);
 }
 

@@ -899,7 +899,7 @@ kvtopte(vm_offset_t va)
 	pt_entry_t *l3e;
 
 	l3e = pmap_pml3e(kernel_pmap, va);
-	if ((be64toh(*l3e) & RPTE_VALID) == 0)
+	if (l3e == NULL || (be64toh(*l3e) & RPTE_VALID) == 0)
 		return (NULL);
 	return (pmap_l3e_to_pte(l3e, va));
 }
@@ -1206,8 +1206,7 @@ retry:
 			break;
 	}
 	for (reclaimed = false; avail < needed; avail += _NPCPV) {
-		m = vm_page_alloc(NULL, 0, VM_ALLOC_NORMAL | VM_ALLOC_NOOBJ |
-		    VM_ALLOC_WIRED);
+		m = vm_page_alloc_noobj(VM_ALLOC_WIRED);
 		if (m == NULL) {
 			m = reclaim_pv_chunk(pmap, lockp);
 			if (m == NULL)
@@ -1629,8 +1628,7 @@ retry:
 		}
 	}
 	/* No free items, allocate another chunk */
-	m = vm_page_alloc(NULL, 0, VM_ALLOC_NORMAL | VM_ALLOC_NOOBJ |
-	    VM_ALLOC_WIRED);
+	m = vm_page_alloc_noobj(VM_ALLOC_WIRED);
 	if (m == NULL) {
 		if (lockp == NULL) {
 			PV_STAT(pc_chunk_tryfail++);
@@ -2059,12 +2057,6 @@ mmu_radix_late_bootstrap(vm_offset_t start, vm_offset_t end)
 	Maxmem = 0;
 	for (i = 0; phys_avail[i + 2] != 0; i += 2)
 		Maxmem = MAX(Maxmem, powerpc_btop(phys_avail[i + 1]));
-
-	/*
-	 * Set the start and end of kva.
-	 */
-	virtual_avail = VM_MIN_KERNEL_ADDRESS;
-	virtual_end = VM_MAX_SAFE_KERNEL_ADDRESS;
 
 	/*
 	 * Remap any early IO mappings (console framebuffer, etc.)
@@ -3185,6 +3177,7 @@ pmap_enter_l3e(pmap_t pmap, vm_offset_t va, pml3_entry_t newpde, u_int flags,
 			 * a reserved PT page could be freed.
 			 */
 			(void)pmap_remove_l3e(pmap, l3e, va, &free, lockp);
+			pmap_invalidate_l3e_page(pmap, va, oldl3e);
 		} else {
 			if (pmap_remove_ptes(pmap, va, va + L3_PAGE_SIZE, l3e,
 			    &free, lockp))
@@ -3243,6 +3236,7 @@ pmap_enter_l3e(pmap_t pmap, vm_offset_t va, pml3_entry_t newpde, u_int flags,
 	 * be any lingering 4KB page mappings in the TLB.)
 	 */
 	pte_store(l3e, newpde);
+	ptesync();
 
 	atomic_add_long(&pmap_l3e_mappings, 1);
 	CTR2(KTR_PMAP, "pmap_enter_pde: success for va %#lx"
@@ -3501,13 +3495,11 @@ mmu_radix_growkernel(vm_offset_t addr)
 		l2e = pmap_pml2e(kernel_pmap, kernel_vm_end);
 		if ((be64toh(*l2e) & PG_V) == 0) {
 			/* We need a new PDP entry */
-			nkpg = vm_page_alloc(NULL, kernel_vm_end >> L2_PAGE_SIZE_SHIFT,
-			    VM_ALLOC_INTERRUPT | VM_ALLOC_NOOBJ |
+			nkpg = vm_page_alloc_noobj(VM_ALLOC_INTERRUPT |
 			    VM_ALLOC_WIRED | VM_ALLOC_ZERO);
 			if (nkpg == NULL)
 				panic("pmap_growkernel: no memory to grow kernel");
-			if ((nkpg->flags & PG_ZERO) == 0)
-				mmu_radix_zero_page(nkpg);
+			nkpg->pindex = kernel_vm_end >> L2_PAGE_SIZE_SHIFT;
 			paddr = VM_PAGE_TO_PHYS(nkpg);
 			pde_store(l2e, paddr);
 			continue; /* try again */
@@ -3522,13 +3514,11 @@ mmu_radix_growkernel(vm_offset_t addr)
 			continue;
 		}
 
-		nkpg = vm_page_alloc(NULL, pmap_l3e_pindex(kernel_vm_end),
-		    VM_ALLOC_INTERRUPT | VM_ALLOC_NOOBJ | VM_ALLOC_WIRED |
+		nkpg = vm_page_alloc_noobj(VM_ALLOC_INTERRUPT | VM_ALLOC_WIRED |
 		    VM_ALLOC_ZERO);
 		if (nkpg == NULL)
 			panic("pmap_growkernel: no memory to grow kernel");
-		if ((nkpg->flags & PG_ZERO) == 0)
-			mmu_radix_zero_page(nkpg);
+		nkpg->pindex = pmap_l3e_pindex(kernel_vm_end);
 		paddr = VM_PAGE_TO_PHYS(nkpg);
 		pde_store(l3e, paddr);
 
@@ -3548,14 +3538,14 @@ static int
 radix_pgd_import(void *arg __unused, void **store, int count, int domain __unused,
     int flags)
 {
+	int req;
 
+	req = VM_ALLOC_WIRED | malloc2vm_flags(flags);
 	for (int i = 0; i < count; i++) {
-		vm_page_t m = vm_page_alloc_contig(NULL, 0,
-		    VM_ALLOC_NORMAL | VM_ALLOC_NOOBJ | VM_ALLOC_WIRED |
-		    VM_ALLOC_ZERO | VM_ALLOC_WAITOK, RADIX_PGD_SIZE/PAGE_SIZE,
+		vm_page_t m = vm_page_alloc_noobj_contig(req,
+		    RADIX_PGD_SIZE / PAGE_SIZE,
 		    0, (vm_paddr_t)-1, RADIX_PGD_SIZE, L1_PAGE_SIZE,
 		    VM_MEMATTR_DEFAULT);
-		/* XXX zero on alloc here so we don't have to later */
 		store[i] = (void *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
 	}
 	return (count);
@@ -4180,7 +4170,7 @@ mmu_radix_pinit(pmap_t pmap)
 
 	for (int j = 0; j <  RADIX_PGD_SIZE_SHIFT; j++)
 		pagezero((vm_offset_t)pmap->pm_pml1 + j * PAGE_SIZE);
-	pmap->pm_radix.rt_root = 0;
+	vm_radix_init(&pmap->pm_radix);
 	TAILQ_INIT(&pmap->pm_pvchunk);
 	bzero(&pmap->pm_stats, sizeof pmap->pm_stats);
 	pmap->pm_flags = PMAP_PDE_SUPERPAGE;
@@ -4215,8 +4205,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 	/*
 	 * Allocate a page table page.
 	 */
-	if ((m = vm_page_alloc(NULL, ptepindex, VM_ALLOC_NOOBJ |
-	    VM_ALLOC_WIRED | VM_ALLOC_ZERO)) == NULL) {
+	if ((m = vm_page_alloc_noobj(VM_ALLOC_WIRED | VM_ALLOC_ZERO)) == NULL) {
 		if (lockp != NULL) {
 			RELEASE_PV_LIST_LOCK(lockp);
 			PMAP_UNLOCK(pmap);
@@ -4229,8 +4218,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 		 */
 		return (NULL);
 	}
-	if ((m->flags & PG_ZERO) == 0)
-		mmu_radix_zero_page(m);
+	m->pindex = ptepindex;
 
 	/*
 	 * Map the pagetable page into the process address space, if
@@ -4244,8 +4232,9 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 		/* Wire up a new PDPE page */
 		pml1index = ptepindex - (NUPDE + NUPDPE);
 		l1e = &pmap->pm_pml1[pml1index];
+		KASSERT((be64toh(*l1e) & PG_V) == 0,
+		    ("%s: L1 entry %#lx is valid", __func__, *l1e));
 		pde_store(l1e, VM_PAGE_TO_PHYS(m));
-
 	} else if (ptepindex >= NUPDE) {
 		vm_pindex_t pml1index;
 		vm_pindex_t pdpindex;
@@ -4274,8 +4263,9 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 
 		/* Now find the pdp page */
 		l2e = &l2e[pdpindex & RPTE_MASK];
+		KASSERT((be64toh(*l2e) & PG_V) == 0,
+		    ("%s: L2 entry %#lx is valid", __func__, *l2e));
 		pde_store(l2e, VM_PAGE_TO_PHYS(m));
-
 	} else {
 		vm_pindex_t pml1index;
 		vm_pindex_t pdpindex;
@@ -4320,6 +4310,8 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 
 		/* Now we know where the page directory page is */
 		l3e = &l3e[ptepindex & RPTE_MASK];
+		KASSERT((be64toh(*l3e) & PG_V) == 0,
+		    ("%s: L3 entry %#lx is valid", __func__, *l3e));
 		pde_store(l3e, VM_PAGE_TO_PHYS(m));
 	}
 
@@ -4409,7 +4401,7 @@ mmu_radix_pinit0(pmap_t pmap)
 	pmap->pm_pml1 = kernel_pmap->pm_pml1;
 	pmap->pm_pid = kernel_pmap->pm_pid;
 
-	pmap->pm_radix.rt_root = 0;
+	vm_radix_init(&pmap->pm_radix);
 	TAILQ_INIT(&pmap->pm_pvchunk);
 	bzero(&pmap->pm_stats, sizeof pmap->pm_stats);
 	kernel_pmap->pm_flags =
@@ -4883,10 +4875,9 @@ pmap_demote_l3e_locked(pmap_t pmap, pml3_entry_t *l3e, vm_offset_t va,
 		 * is the only part of the kernel address space that must be
 		 * handled here.
 		 */
-		if ((oldpde & PG_A) == 0 || (mpte = vm_page_alloc(NULL,
-		    pmap_l3e_pindex(va), (va >= DMAP_MIN_ADDRESS && va <
-		    DMAP_MAX_ADDRESS ? VM_ALLOC_INTERRUPT : VM_ALLOC_NORMAL) |
-		    VM_ALLOC_NOOBJ | VM_ALLOC_WIRED)) == NULL) {
+		if ((oldpde & PG_A) == 0 || (mpte = vm_page_alloc_noobj(
+		    (va >= DMAP_MIN_ADDRESS && va < DMAP_MAX_ADDRESS ?
+		    VM_ALLOC_INTERRUPT : 0) | VM_ALLOC_WIRED)) == NULL) {
 			SLIST_INIT(&free);
 			sva = trunc_2mpage(va);
 			pmap_remove_l3e(pmap, l3e, sva, &free, lockp);
@@ -4896,6 +4887,7 @@ pmap_demote_l3e_locked(pmap_t pmap, pml3_entry_t *l3e, vm_offset_t va,
 			    " in pmap %p", va, pmap);
 			return (FALSE);
 		}
+		mpte->pindex = pmap_l3e_pindex(va);
 		if (va < VM_MAXUSER_ADDRESS)
 			pmap_resident_count_inc(pmap, 1);
 	}
@@ -4944,7 +4936,7 @@ pmap_demote_l3e_locked(pmap_t pmap, pml3_entry_t *l3e, vm_offset_t va,
 	 * the read above and the store below.
 	 */
 	pde_store(l3e, mptepa);
-	ptesync();
+	pmap_invalidate_l3e_page(pmap, trunc_2mpage(va), oldpde);
 	/*
 	 * Demote the PV entry.
 	 */
@@ -5225,6 +5217,7 @@ mmu_radix_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 			 */
 			if (sva + L3_PAGE_SIZE == va_next && eva >= va_next) {
 				pmap_remove_l3e(pmap, l3e, sva, &free, &lock);
+				anyvalid = true;
 				continue;
 			} else if (!pmap_demote_l3e_locked(pmap, l3e, sva,
 			    &lock)) {
@@ -5914,13 +5907,13 @@ pmap_demote_l2e(pmap_t pmap, pml2_entry_t *l2e, vm_offset_t va)
 	oldpdpe = be64toh(*l2e);
 	KASSERT((oldpdpe & (RPTE_LEAF | PG_V)) == (RPTE_LEAF | PG_V),
 	    ("pmap_demote_pdpe: oldpdpe is missing PG_PS and/or PG_V"));
-	pdpg = vm_page_alloc(NULL, va >> L2_PAGE_SIZE_SHIFT,
-	    VM_ALLOC_INTERRUPT | VM_ALLOC_NOOBJ | VM_ALLOC_WIRED);
+	pdpg = vm_page_alloc_noobj(VM_ALLOC_INTERRUPT | VM_ALLOC_WIRED);
 	if (pdpg == NULL) {
 		CTR2(KTR_PMAP, "pmap_demote_pdpe: failure for va %#lx"
 		    " in pmap %p", va, pmap);
 		return (FALSE);
 	}
+	pdpg->pindex = va >> L2_PAGE_SIZE_SHIFT;
 	pdpgpa = VM_PAGE_TO_PHYS(pdpg);
 	firstpde = (pml3_entry_t *)PHYS_TO_DMAP(pdpgpa);
 	KASSERT((oldpdpe & PG_A) != 0,

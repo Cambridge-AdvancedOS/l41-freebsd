@@ -449,6 +449,44 @@ sys_nmount(struct thread *td, struct nmount_args *uap)
  * Various utility functions
  */
 
+/*
+ * Get a reference on a mount point from a vnode.
+ *
+ * The vnode is allowed to be passed unlocked and race against dooming. Note in
+ * such case there are no guarantees the referenced mount point will still be
+ * associated with it after the function returns.
+ */
+struct mount *
+vfs_ref_from_vp(struct vnode *vp)
+{
+	struct mount *mp;
+	struct mount_pcpu *mpcpu;
+
+	mp = atomic_load_ptr(&vp->v_mount);
+	if (__predict_false(mp == NULL)) {
+		return (mp);
+	}
+	if (vfs_op_thread_enter(mp, mpcpu)) {
+		if (__predict_true(mp == vp->v_mount)) {
+			vfs_mp_count_add_pcpu(mpcpu, ref, 1);
+			vfs_op_thread_exit(mp, mpcpu);
+		} else {
+			vfs_op_thread_exit(mp, mpcpu);
+			mp = NULL;
+		}
+	} else {
+		MNT_ILOCK(mp);
+		if (mp == vp->v_mount) {
+			MNT_REF(mp);
+			MNT_IUNLOCK(mp);
+		} else {
+			MNT_IUNLOCK(mp);
+			mp = NULL;
+		}
+	}
+	return (mp);
+}
+
 void
 vfs_ref(struct mount *mp)
 {
@@ -908,20 +946,12 @@ vfs_domount_first(
 	ASSERT_VOP_ELOCKED(vp, __func__);
 	KASSERT((fsflags & MNT_UPDATE) == 0, ("MNT_UPDATE shouldn't be here"));
 
-	if ((fsflags & MNT_EMPTYDIR) != 0) {
-		error = vfs_emptydir(vp);
-		if (error != 0) {
-			vput(vp);
-			return (error);
-		}
-	}
-
 	/*
 	 * If the jail of the calling thread lacks permission for this type of
-	 * file system, deny immediately.
+	 * file system, or is trying to cover its own root, deny immediately.
 	 */
-	if (jailed(td->td_ucred) && !prison_allow(td->td_ucred,
-	    vfsp->vfc_prison_flag)) {
+	if (jailed(td->td_ucred) && (!prison_allow(td->td_ucred,
+	    vfsp->vfc_prison_flag) || vp == td->td_ucred->cr_prison->pr_root)) {
 		vput(vp);
 		return (EPERM);
 	}
@@ -937,6 +967,8 @@ vfs_domount_first(
 		error = vinvalbuf(vp, V_SAVE, 0, 0);
 	if (error == 0 && vp->v_type != VDIR)
 		error = ENOTDIR;
+	if (error == 0 && (fsflags & MNT_EMPTYDIR) != 0)
+		error = vfs_emptydir(vp);
 	if (error == 0) {
 		VI_LOCK(vp);
 		if ((vp->v_iflag & VI_MOUNT) == 0 && vp->v_mountedhere == NULL)
@@ -2478,27 +2510,6 @@ static struct mntoptnames optnames[] = {
 	MNTOPT_NAMES
 };
 
-static void
-mount_devctl_event_mntopt(struct sbuf *sb, const char *what, struct vfsoptlist *opts)
-{
-	struct vfsopt *opt;
-
-	if (opts == NULL || TAILQ_EMPTY(opts))
-		return;
-	sbuf_printf(sb, " %s=\"", what);
-	TAILQ_FOREACH(opt, opts, link) {
-		if (opt->name[0] == '\0' || (opt->len > 0 && *(char *)opt->value == '\0'))
-			continue;
-		devctl_safe_quote_sb(sb, opt->name);
-		if (opt->len > 0) {
-			sbuf_putc(sb, '=');
-			devctl_safe_quote_sb(sb, opt->value);
-		}
-		sbuf_putc(sb, ';');
-	}
-	sbuf_putc(sb, '"');
-}
-
 #define DEVCTL_LEN 1024
 static void
 mount_devctl_event(const char *type, struct mount *mp, bool donew)
@@ -2531,10 +2542,14 @@ mount_devctl_event(const char *type, struct mount *mp, bool donew)
 		}
 	}
 	sbuf_putc(&sb, '"');
-	mount_devctl_event_mntopt(&sb, "opt", mp->mnt_opt);
-	if (donew)
-		mount_devctl_event_mntopt(&sb, "optnew", mp->mnt_optnew);
 	sbuf_finish(&sb);
+
+	/*
+	 * Options are not published because the form of the options depends on
+	 * the file system and may include binary data. In addition, they don't
+	 * necessarily provide enough useful information to be actionable when
+	 * devd processes them.
+	 */
 
 	if (sbuf_error(&sb) == 0)
 		devctl_notify("VFS", "FS", type, sbuf_data(&sb));

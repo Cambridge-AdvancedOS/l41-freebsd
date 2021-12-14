@@ -1219,7 +1219,8 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 	 */
 	if (imgp->credential_setid) {
 		PROC_LOCK(imgp->proc);
-		imgp->proc->p_flag2 &= ~(P2_ASLR_ENABLE | P2_ASLR_DISABLE);
+		imgp->proc->p_flag2 &= ~(P2_ASLR_ENABLE | P2_ASLR_DISABLE |
+		    P2_WXORX_DISABLE | P2_WXORX_ENABLE_EXEC);
 		PROC_UNLOCK(imgp->proc);
 	}
 	if ((sv->sv_flags & SV_ASLR) == 0 ||
@@ -1242,7 +1243,9 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 			imgp->map_flags |= MAP_ASLR_IGNSTART;
 	}
 
-	if (!__elfN(allow_wx) && (fctl0 & NT_FREEBSD_FCTL_WXNEEDED) == 0)
+	if ((!__elfN(allow_wx) && (fctl0 & NT_FREEBSD_FCTL_WXNEEDED) == 0 &&
+	    (imgp->proc->p_flag2 & P2_WXORX_DISABLE) == 0) ||
+	    (imgp->proc->p_flag2 & P2_WXORX_ENABLE_EXEC) != 0)
 		imgp->map_flags |= MAP_WXORX;
 
 	error = exec_new_vmspace(imgp, sv);
@@ -1287,7 +1290,8 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 		maxv1 = maxv / 2 + addr / 2;
 		MPASS(maxv1 >= addr);	/* No overflow */
 		map->anon_loc = __CONCAT(rnd_, __elfN(base))(map, addr, maxv1,
-		    MAXPAGESIZES > 1 ? pagesizes[1] : pagesizes[0]);
+		    (MAXPAGESIZES > 1 && pagesizes[1] != 0) ?
+		    pagesizes[1] : pagesizes[0]);
 	} else {
 		map->anon_loc = addr;
 	}
@@ -1297,7 +1301,7 @@ __CONCAT(exec_, __elfN(imgact))(struct image_params *imgp)
 	if (interp != NULL) {
 		VOP_UNLOCK(imgp->vp);
 		if ((map->flags & MAP_ASLR) != 0) {
-			/* Assume that interpeter fits into 1/4 of AS */
+			/* Assume that interpreter fits into 1/4 of AS */
 			maxv1 = maxv / 2 + addr / 2;
 			MPASS(maxv1 >= addr);	/* No overflow */
 			addr = __CONCAT(rnd_, __elfN(base))(map, addr,
@@ -1344,7 +1348,7 @@ ret:
 	return (error);
 }
 
-#define	suword __CONCAT(suword, __ELF_WORD_SIZE)
+#define	elf_suword __CONCAT(suword, __ELF_WORD_SIZE)
 
 int
 __elfN(freebsd_copyout_auxargs)(struct image_params *imgp, uintptr_t base)
@@ -1417,7 +1421,7 @@ __elfN(freebsd_fixup)(uintptr_t *stack_base, struct image_params *imgp)
 
 	base = (Elf_Addr *)*stack_base;
 	base--;
-	if (suword(base, imgp->args->argc) == -1)
+	if (elf_suword(base, imgp->args->argc) == -1)
 		return (EFAULT);
 	*stack_base = (uintptr_t)base;
 	return (0);
@@ -1470,12 +1474,13 @@ static void cb_put_phdr(vm_map_entry_t, void *);
 static void cb_size_segment(vm_map_entry_t, void *);
 static int core_write(struct coredump_params *, const void *, size_t, off_t,
     enum uio_seg, size_t *);
-static void each_dumpable_segment(struct thread *, segment_callback, void *);
+static void each_dumpable_segment(struct thread *, segment_callback, void *,
+    int);
 static int __elfN(corehdr)(struct coredump_params *, int, void *, size_t,
-    struct note_info_list *, size_t);
+    struct note_info_list *, size_t, int);
 static void __elfN(prepare_notes)(struct thread *, struct note_info_list *,
     size_t *);
-static void __elfN(puthdr)(struct thread *, void *, size_t, int, size_t);
+static void __elfN(puthdr)(struct thread *, void *, size_t, int, size_t, int);
 static void __elfN(putnote)(struct note_info *, struct sbuf *);
 static size_t register_note(struct note_info_list *, int, outfunc_t, void *);
 static int sbuf_drain_core_output(void *, const char *, int);
@@ -1500,9 +1505,9 @@ static void note_procstat_vmmap(void *, struct sbuf *, size_t *);
  * Write out a core segment to the compression stream.
  */
 static int
-compress_chunk(struct coredump_params *p, char *base, char *buf, u_int len)
+compress_chunk(struct coredump_params *p, char *base, char *buf, size_t len)
 {
-	u_int chunk_len;
+	size_t chunk_len;
 	int error;
 
 	while (len > 0) {
@@ -1542,6 +1547,8 @@ core_write(struct coredump_params *p, const void *base, size_t len,
 	    p->active_cred, p->file_cred, resid, p->td));
 }
 
+extern int core_dump_can_intr;
+
 static int
 core_output(char *base, size_t len, off_t offset, struct coredump_params *p,
     void *tmpbuf)
@@ -1567,6 +1574,8 @@ core_output(char *base, size_t len, off_t offset, struct coredump_params *p,
 		 * anonymous memory or truncated files, for example.
 		 */
 		for (runlen = 0; runlen < len; runlen += PAGE_SIZE) {
+			if (core_dump_can_intr && curproc_sigkilled())
+				return (EINTR);
 			error = vm_fault(map, (uintptr_t)base + runlen,
 			    VM_PROT_READ, VM_FAULT_NOFILL, NULL);
 			if (runlen == 0)
@@ -1653,7 +1662,7 @@ int
 __elfN(coredump)(struct thread *td, struct vnode *vp, off_t limit, int flags)
 {
 	struct ucred *cred = td->td_ucred;
-	int error = 0;
+	int compm, error = 0;
 	struct sseg_closure seginfo;
 	struct note_info_list notelst;
 	struct coredump_params params;
@@ -1668,7 +1677,7 @@ __elfN(coredump)(struct thread *td, struct vnode *vp, off_t limit, int flags)
 	/* Size the program segments. */
 	seginfo.count = 0;
 	seginfo.size = 0;
-	each_dumpable_segment(td, cb_size_segment, &seginfo);
+	each_dumpable_segment(td, cb_size_segment, &seginfo, flags);
 
 	/*
 	 * Collect info about the core file header area.
@@ -1704,9 +1713,13 @@ __elfN(coredump)(struct thread *td, struct vnode *vp, off_t limit, int flags)
 	}
 
 	/* Create a compression stream if necessary. */
-	if (compress_user_cores != 0) {
+	compm = compress_user_cores;
+	if ((flags & (SVC_PT_COREDUMP | SVC_NOCOMPRESS)) == SVC_PT_COREDUMP &&
+	    compm == 0)
+		compm = COMPRESS_GZIP;
+	if (compm != 0) {
 		params.comp = compressor_init(core_compressed_write,
-		    compress_user_cores, CORE_BUF_SIZE,
+		    compm, CORE_BUF_SIZE,
 		    compress_user_cores_level, &params);
 		if (params.comp == NULL) {
 			error = EFAULT;
@@ -1721,7 +1734,7 @@ __elfN(coredump)(struct thread *td, struct vnode *vp, off_t limit, int flags)
 	 */
 	hdr = malloc(hdrsize, M_TEMP, M_WAITOK);
 	error = __elfN(corehdr)(&params, seginfo.count, hdr, hdrsize, &notelst,
-	    notesz);
+	    notesz, flags);
 
 	/* Write the contents of all of the writable segments. */
 	if (error == 0) {
@@ -1805,7 +1818,8 @@ cb_size_segment(vm_map_entry_t entry, void *closure)
  * caller-supplied data.
  */
 static void
-each_dumpable_segment(struct thread *td, segment_callback func, void *closure)
+each_dumpable_segment(struct thread *td, segment_callback func, void *closure,
+    int flags)
 {
 	struct proc *p = td->td_proc;
 	vm_map_t map = &p->p_vmspace->vm_map;
@@ -1823,12 +1837,15 @@ each_dumpable_segment(struct thread *td, segment_callback func, void *closure)
 		 * are marked MAP_ENTRY_NOCOREDUMP now so we no longer
 		 * need to arbitrarily ignore such segments.
 		 */
-		if (elf_legacy_coredump) {
-			if ((entry->protection & VM_PROT_RW) != VM_PROT_RW)
-				continue;
-		} else {
-			if ((entry->protection & VM_PROT_ALL) == 0)
-				continue;
+		if ((flags & SVC_ALL) == 0) {
+			if (elf_legacy_coredump) {
+				if ((entry->protection & VM_PROT_RW) !=
+				    VM_PROT_RW)
+					continue;
+			} else {
+				if ((entry->protection & VM_PROT_ALL) == 0)
+					continue;
+			}
 		}
 
 		/*
@@ -1837,9 +1854,11 @@ each_dumpable_segment(struct thread *td, segment_callback func, void *closure)
 		 * madvise(2).  Do not dump submaps (i.e. parts of the
 		 * kernel map).
 		 */
-		if (entry->eflags & (MAP_ENTRY_NOCOREDUMP|MAP_ENTRY_IS_SUB_MAP))
+		if ((entry->eflags & MAP_ENTRY_IS_SUB_MAP) != 0)
 			continue;
-
+		if ((entry->eflags & MAP_ENTRY_NOCOREDUMP) != 0 &&
+		    (flags & SVC_ALL) == 0)
+			continue;
 		if ((object = entry->object.vm_object) == NULL)
 			continue;
 
@@ -1866,7 +1885,8 @@ each_dumpable_segment(struct thread *td, segment_callback func, void *closure)
  */
 static int
 __elfN(corehdr)(struct coredump_params *p, int numsegs, void *hdr,
-    size_t hdrsize, struct note_info_list *notelst, size_t notesz)
+    size_t hdrsize, struct note_info_list *notelst, size_t notesz,
+    int flags)
 {
 	struct note_info *ninfo;
 	struct sbuf *sb;
@@ -1874,7 +1894,7 @@ __elfN(corehdr)(struct coredump_params *p, int numsegs, void *hdr,
 
 	/* Fill in the header. */
 	bzero(hdr, hdrsize);
-	__elfN(puthdr)(p->td, hdr, hdrsize, numsegs, notesz);
+	__elfN(puthdr)(p->td, hdr, hdrsize, numsegs, notesz, flags);
 
 	sb = sbuf_new(NULL, NULL, CORE_BUF_SIZE, SBUF_FIXEDLEN);
 	sbuf_set_drain(sb, sbuf_drain_core_output, p);
@@ -1952,7 +1972,7 @@ __elfN(prepare_notes)(struct thread *td, struct note_info_list *list,
 
 static void
 __elfN(puthdr)(struct thread *td, void *hdr, size_t hdrsize, int numsegs,
-    size_t notesz)
+    size_t notesz, int flags)
 {
 	Elf_Ehdr *ehdr;
 	Elf_Phdr *phdr;
@@ -2031,7 +2051,7 @@ __elfN(puthdr)(struct thread *td, void *hdr, size_t hdrsize, int numsegs,
 	/* All the writable segments from the program. */
 	phc.phdr = phdr;
 	phc.offset = round_page(hdrsize + notesz);
-	each_dumpable_segment(td, cb_put_phdr, &phc);
+	each_dumpable_segment(td, cb_put_phdr, &phc, flags);
 }
 
 static size_t
@@ -2735,6 +2755,7 @@ note_fctl_cb(const Elf_Note *note, void *arg0, boolean_t *res)
 	desc = (const Elf32_Word *)p;
 	*arg->has_fctl0 = TRUE;
 	*arg->fctl0 = desc[0];
+	*res = TRUE;
 	return (TRUE);
 }
 

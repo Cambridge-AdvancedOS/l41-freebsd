@@ -167,4 +167,33 @@ str_has_prefix(const char *str, const char *prefix)
 	return (strncmp(str, prefix, len) == 0 ? len : 0);
 }
 
+static inline char *
+strreplace(char *str, char old, char new)
+{
+	char *p;
+
+	p = strchrnul(str, old);
+	while (p != NULL && *p != '\0') {
+		*p = new;
+		p = strchrnul(str, old);
+	}
+	return (p);
+}
+
+static inline ssize_t
+strscpy(char* dst, const char* src, size_t len)
+{
+	size_t i;
+
+	if (len <= INT_MAX) {
+		for (i = 0; i < len; i++)
+			if ('\0' == (dst[i] = src[i]))
+				return ((ssize_t)i);
+		if (i != 0)
+			dst[--i] = '\0';
+	}
+
+	return (-E2BIG);
+}
+
 #endif					/* _LINUX_STRING_H_ */

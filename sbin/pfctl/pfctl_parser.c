@@ -50,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include <net/pfvar.h>
 #include <arpa/inet.h>
 
+#include <assert.h>
 #include <search.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -412,7 +413,7 @@ print_fromto(struct pf_rule_addr *src, pf_osfp_t osfp, struct pf_rule_addr *dst,
 }
 
 void
-print_pool(struct pf_pool *pool, u_int16_t p1, u_int16_t p2,
+print_pool(struct pfctl_pool *pool, u_int16_t p1, u_int16_t p2,
     sa_family_t af, int id)
 {
 	struct pf_pooladdr	*pooladdr;
@@ -486,6 +487,9 @@ print_pool(struct pf_pool *pool, u_int16_t p1, u_int16_t p2,
 		printf(" sticky-address");
 	if (id == PF_NAT && p1 == 0 && p2 == 0)
 		printf(" static-port");
+	if (pool->mape.offset > 0)
+		printf(" map-e-portset %u/%u/%u",
+		    pool->mape.offset, pool->mape.psidlen, pool->mape.psid);
 }
 
 const char	* const pf_reasons[PFRES_MAX+1] = PFRES_NAMES;
@@ -494,8 +498,9 @@ const char	* const pf_fcounters[FCNT_MAX+1] = FCNT_NAMES;
 const char	* const pf_scounters[FCNT_MAX+1] = FCNT_NAMES;
 
 void
-print_status(struct pf_status *s, int opts)
+print_status(struct pfctl_status *s, struct pfctl_syncookies *cookies, int opts)
 {
+	struct pfctl_status_counter	*c;
 	char			statline[80], *running;
 	time_t			runtime;
 	int			i;
@@ -571,64 +576,57 @@ print_status(struct pf_status *s, int opts)
 		    (unsigned long long)s->pcounters[1][1][PF_DROP]);
 	}
 	printf("%-27s %14s %16s\n", "State Table", "Total", "Rate");
-	printf("  %-25s %14u %14s\n", "current entries", s->states, "");
-	for (i = 0; i < FCNT_MAX; i++) {
-		printf("  %-25s %14llu ", pf_fcounters[i],
-			    (unsigned long long)s->fcounters[i]);
+	printf("  %-25s %14ju %14s\n", "current entries", s->states, "");
+	TAILQ_FOREACH(c, &s->fcounters, entry) {
+		printf("  %-25s %14ju ", c->name, c->counter);
 		if (runtime > 0)
 			printf("%14.1f/s\n",
-			    (double)s->fcounters[i] / (double)runtime);
+			    (double)c->counter / (double)runtime);
 		else
 			printf("%14s\n", "");
 	}
 	if (opts & PF_OPT_VERBOSE) {
 		printf("Source Tracking Table\n");
-		printf("  %-25s %14u %14s\n", "current entries",
+		printf("  %-25s %14ju %14s\n", "current entries",
 		    s->src_nodes, "");
-		for (i = 0; i < SCNT_MAX; i++) {
-			printf("  %-25s %14lld ", pf_scounters[i],
-#ifdef __FreeBSD__
-				    (long long)s->scounters[i]);
-#else
-				    s->scounters[i]);
-#endif
+		TAILQ_FOREACH(c, &s->scounters, entry) {
+			printf("  %-25s %14ju ", c->name, c->counter);
 			if (runtime > 0)
 				printf("%14.1f/s\n",
-				    (double)s->scounters[i] / (double)runtime);
+				    (double)c->counter / (double)runtime);
 			else
 				printf("%14s\n", "");
 		}
 	}
 	printf("Counters\n");
-	for (i = 0; i < PFRES_MAX; i++) {
-		printf("  %-25s %14llu ", pf_reasons[i],
-		    (unsigned long long)s->counters[i]);
+	TAILQ_FOREACH(c, &s->counters, entry) {
+		printf("  %-25s %14ju ", c->name, c->counter);
 		if (runtime > 0)
 			printf("%14.1f/s\n",
-			    (double)s->counters[i] / (double)runtime);
+			    (double)c->counter / (double)runtime);
 		else
 			printf("%14s\n", "");
 	}
 	if (opts & PF_OPT_VERBOSE) {
 		printf("Limit Counters\n");
-		for (i = 0; i < LCNT_MAX; i++) {
-			printf("  %-25s %14lld ", pf_lcounters[i],
-#ifdef __FreeBSD__
-				    (unsigned long long)s->lcounters[i]);
-#else
-				    s->lcounters[i]);
-#endif
+		TAILQ_FOREACH(c, &s->lcounters, entry) {
+			printf("  %-25s %14ju ", c->name, c->counter);
 			if (runtime > 0)
 				printf("%14.1f/s\n",
-				    (double)s->lcounters[i] / (double)runtime);
+				    (double)c->counter / (double)runtime);
 			else
 				printf("%14s\n", "");
 		}
+
+		printf("Syncookies\n");
+		assert(cookies->mode <= PFCTL_SYNCOOKIES_ADAPTIVE);
+		printf("  %-25s %s\n", "mode",
+		    PFCTL_SYNCOOKIES_MODE_NAMES[cookies->mode]);
 	}
 }
 
 void
-print_running(struct pf_status *status)
+print_running(struct pfctl_status *status)
 {
 	printf("%s\n", status->running ? "Enabled" : "Disabled");
 }
@@ -694,7 +692,7 @@ print_src_node(struct pf_src_node *sn, int opts)
 }
 
 void
-print_rule(struct pf_rule *r, const char *anchor_call, int verbose, int numeric)
+print_rule(struct pfctl_rule *r, const char *anchor_call, int verbose, int numeric)
 {
 	static const char *actiontypes[] = { "pass", "block", "scrub",
 	    "no scrub", "nat", "no nat", "binat", "no binat", "rdr", "no rdr" };
@@ -705,7 +703,9 @@ print_rule(struct pf_rule *r, const char *anchor_call, int verbose, int numeric)
 
 	if (verbose)
 		printf("@%d ", r->nr);
-	if (r->action > PF_NORDR)
+	if (r->action == PF_MATCH)
+		printf("match");
+	else if (r->action > PF_NORDR)
 		printf("action(%d)", r->action);
 	else if (anchor_call[0]) {
 		if (anchor_call[0] == '_') {
@@ -809,10 +809,10 @@ print_rule(struct pf_rule *r, const char *anchor_call, int verbose, int numeric)
 			printf(" inet6");
 	}
 	if (r->proto) {
-		struct protoent	*p;
+		const char *protoname;
 
-		if ((p = getprotobynumber(r->proto)) != NULL)
-			printf(" proto %s", p->p_name);
+		if ((protoname = pfctl_proto2name(r->proto)) != NULL)
+			printf(" proto %s", protoname);
 		else
 			printf(" proto %u", r->proto);
 	}
@@ -1016,8 +1016,11 @@ print_rule(struct pf_rule *r, const char *anchor_call, int verbose, int numeric)
 
 		printf(" fragment reassemble");
 	}
-	if (r->label[0])
-		printf(" label \"%s\"", r->label);
+	i = 0;
+	while (r->label[i][0])
+		printf(" label \"%s\"", r->label[i++]);
+	if (r->ridentifier)
+		printf(" ridentifier %u", r->ridentifier);
 	if (r->qname[0] && r->pqname[0])
 		printf(" queue(%s, %s)", r->qname, r->pqname);
 	else if (r->qname[0])
@@ -1392,26 +1395,6 @@ ifa_exists(char *ifa_name)
 	return (NULL);
 }
 
-static struct node_host *
-if_lookup(char *if_name)
-{
-	struct node_host *p, *n;
-
-	for (p = iftab; p; p = p->next) {
-		if (! strcmp(if_name, p->ifname)) {
-			n = calloc(1, sizeof(struct node_host));
-			bcopy(p, n, sizeof(struct node_host));
-
-			n->next = NULL;
-			n->tail = n;
-
-			return (n);
-		}
-	}
-
-	return (NULL);
-}
-
 struct node_host *
 ifa_grouplookup(char *ifa_name, int flags)
 {
@@ -1435,7 +1418,7 @@ ifa_grouplookup(char *ifa_name, int flags)
 	for (ifg = ifgr.ifgr_groups; ifg && len >= sizeof(struct ifg_req);
 	    ifg++) {
 		len -= sizeof(struct ifg_req);
-		if ((n = if_lookup(ifg->ifgrq_member)) == NULL)
+		if ((n = ifa_lookup(ifg->ifgrq_member, flags)) == NULL)
 			continue;
 		if (h == NULL)
 			h = n;

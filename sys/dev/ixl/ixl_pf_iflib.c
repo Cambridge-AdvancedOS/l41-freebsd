@@ -185,7 +185,7 @@ ixl_msix_adminq(void *arg)
 		}
 		device_printf(dev, "Reset Requested! (%s)\n", reset_type);
 		/* overload admin queue task to check reset progress */
-		atomic_set_int(&pf->state, IXL_PF_STATE_ADAPTER_RESETTING);
+		atomic_set_int(&pf->state, IXL_PF_STATE_RESETTING);
 		do_task = TRUE;
 	}
 
@@ -403,18 +403,23 @@ ixl_link_event(struct ixl_pf *pf, struct i40e_arq_event_info *e)
 {
 	struct i40e_hw *hw = &pf->hw;
 	device_t dev = iflib_get_dev(pf->vsi.ctx);
-	struct i40e_aqc_get_link_status *status =
-	    (struct i40e_aqc_get_link_status *)&e->desc.params.raw;
+	struct i40e_link_status *link_info = &hw->phy.link_info;
 
-	/* Request link status from adapter */
+	/* Driver needs to re-enable delivering of link status events
+	 * by FW after each event reception. Call i40e_get_link_status
+	 * to do that. To not lose information about link state changes,
+	 * which happened between receiving an event and the call,
+	 * do not rely on status from event but use most recent
+	 * status information retrieved by the call. */
 	hw->phy.get_link_info = TRUE;
 	i40e_get_link_status(hw, &pf->link_up);
 
 	/* Print out message if an unqualified module is found */
-	if ((status->link_info & I40E_AQ_MEDIA_AVAILABLE) &&
+	if ((link_info->link_info & I40E_AQ_MEDIA_AVAILABLE) &&
 	    (pf->advertised_speed) &&
-	    (!(status->an_info & I40E_AQ_QUALIFIED_MODULE)) &&
-	    (!(status->link_info & I40E_AQ_LINK_UP)))
+	    (if_getflags(pf->vsi.ifp) & IFF_UP) &&
+	    (!(link_info->an_info & I40E_AQ_QUALIFIED_MODULE)) &&
+	    (!(link_info->link_info & I40E_AQ_LINK_UP)))
 		device_printf(dev, "Link failed because "
 		    "an unqualified module was detected!\n");
 
@@ -866,41 +871,6 @@ ixl_set_rss_hlut(struct ixl_pf *pf)
 	}
 }
 
-/*
-** This routine updates vlan filters, called by init
-** it scans the filter table and then updates the hw
-** after a soft reset.
-*/
-void
-ixl_setup_vlan_filters(struct ixl_vsi *vsi)
-{
-	struct ixl_mac_filter	*f;
-	int			cnt = 0, flags;
-
-	if (vsi->num_vlans == 0)
-		return;
-	/*
-	** Scan the filter list for vlan entries,
-	** mark them for addition and then call
-	** for the AQ update.
-	*/
-	SLIST_FOREACH(f, &vsi->ftl, next) {
-		if (f->flags & IXL_FILTER_VLAN) {
-			f->flags |=
-			    (IXL_FILTER_ADD |
-			    IXL_FILTER_USED);
-			cnt++;
-		}
-	}
-	if (cnt == 0) {
-		printf("setup vlan: no filters found!\n");
-		return;
-	}
-	flags = IXL_FILTER_VLAN;
-	flags |= (IXL_FILTER_ADD | IXL_FILTER_USED);
-	ixl_add_hw_filters(vsi, flags, cnt);
-}
-
 /* For PF VSI only */
 int
 ixl_enable_rings(struct ixl_vsi *vsi)
@@ -1127,7 +1097,7 @@ ixl_sysctl_set_flowcntl(SYSCTL_HANDLER_ARGS)
 	aq_error = i40e_set_fc(hw, &fc_aq_err, TRUE);
 	if (aq_error) {
 		device_printf(dev,
-		    "%s: Error setting new fc mode %d; fc_err %#x\n",
+		    "%s: Error setting Flow Control mode %d; fc_err %#x\n",
 		    __func__, aq_error, fc_aq_err);
 		return (EIO);
 	}

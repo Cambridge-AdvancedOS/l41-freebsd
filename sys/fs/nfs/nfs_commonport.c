@@ -76,6 +76,7 @@ void (*nfsd_call_servertimer)(void) = NULL;
 void (*ncl_call_invalcaches)(struct vnode *) = NULL;
 vop_advlock_t *nfs_advlock_p = NULL;
 vop_reclaim_t *nfs_reclaim_p = NULL;
+uint32_t nfs_srvmaxio = NFS_SRVMAXIO;
 
 int nfs_pnfsio(task_fn_t *, void *);
 
@@ -123,7 +124,7 @@ MALLOC_DEFINE(M_NEWNFSCLLOCKOWNER, "NFSCL lckown", "NFSCL Lock Owner");
 MALLOC_DEFINE(M_NEWNFSCLLOCK, "NFSCL lck", "NFSCL Lock");
 MALLOC_DEFINE(M_NEWNFSV4NODE, "NEWNFSnode", "NFS vnode");
 MALLOC_DEFINE(M_NEWNFSDIRECTIO, "NEWdirectio", "NFS Direct IO buffer");
-MALLOC_DEFINE(M_NEWNFSDIROFF, "NFSCL diroffdiroff",
+MALLOC_DEFINE(M_NEWNFSDIROFF, "NFSCL diroff",
     "NFS directory offset data");
 MALLOC_DEFINE(M_NEWNFSDROLLBACK, "NFSD rollback",
     "NFS local lock rollback");
@@ -303,11 +304,11 @@ nfsvno_getfs(struct nfsfsinfo *sip, int isdgram)
 	if (isdgram)
 		pref = NFS_MAXDGRAMDATA;
 	else
-		pref = NFS_SRVMAXIO;
-	sip->fs_rtmax = NFS_SRVMAXIO;
+		pref = nfs_srvmaxio;
+	sip->fs_rtmax = nfs_srvmaxio;
 	sip->fs_rtpref = pref;
 	sip->fs_rtmult = NFS_FABLKSIZE;
-	sip->fs_wtmax = NFS_SRVMAXIO;
+	sip->fs_wtmax = nfs_srvmaxio;
 	sip->fs_wtpref = pref;
 	sip->fs_wtmult = NFS_FABLKSIZE;
 	sip->fs_dtpref = pref;

@@ -79,7 +79,7 @@ __FBSDID("$FreeBSD$");
 #define	fxrstor(addr)		__asm __volatile("fxrstor %0" : : "m" (*(addr)))
 #define	fxsave(addr)		__asm __volatile("fxsave %0" : "=m" (*(addr)))
 #define	ldmxcsr(csr)		__asm __volatile("ldmxcsr %0" : : "m" (csr))
-#define	stmxcsr(addr)		__asm __volatile("stmxcsr %0" : : "m" (*(addr)))
+#define	stmxcsr(addr)		__asm __volatile("stmxcsr %0" : "=m" (*(addr)))
 
 static __inline void
 xrstor32(char *addr, uint64_t mask)
@@ -448,6 +448,8 @@ fpuinitstate(void *arg __unused)
 		    xsave_area_elm_descr), M_DEVBUF, M_WAITOK | M_ZERO);
 	}
 
+	cpu_thread_alloc(&thread0);
+
 	saveintr = intr_disable();
 	stop_emulating();
 
@@ -495,7 +497,7 @@ fpuinitstate(void *arg __unused)
 	intr_restore(saveintr);
 }
 /* EFIRT needs this to be initialized before we can enter our EFI environment */
-SYSINIT(fpuinitstate, SI_SUB_DRIVERS, SI_ORDER_FIRST, fpuinitstate, NULL);
+SYSINIT(fpuinitstate, SI_SUB_CPU, SI_ORDER_ANY, fpuinitstate, NULL);
 
 /*
  * Free coprocessor (if we have it).

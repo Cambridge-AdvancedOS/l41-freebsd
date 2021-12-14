@@ -152,6 +152,8 @@ struct inode {
 #define	IN_IBLKDATA	0x0800		/* datasync requires inode block
 					   update */
 #define	IN_SIZEMOD	0x1000		/* Inode size has been modified */
+#define	IN_ENDOFF	0x2000		/* Free space at the end of directory,
+					   try to truncate when possible */
 
 #define PRINT_INODE_FLAGS "\20\20b16\17b15\16b14\15sizemod" \
 	"\14iblkdata\13is_ufs2\12truncated\11ea_lockwait\10ea_locked" \
@@ -259,11 +261,11 @@ struct indir {
 #define	ITOV(ip)	((ip)->i_vnode)
 
 /* Determine if soft dependencies are being done */
-#define	DOINGSOFTDEP(vp)   \
-	(((vp)->v_mount->mnt_flag & (MNT_SOFTDEP | MNT_SUJ)) != 0)
-#define	MOUNTEDSOFTDEP(mp) (((mp)->mnt_flag & (MNT_SOFTDEP | MNT_SUJ)) != 0)
-#define	DOINGSUJ(vp)	   (((vp)->v_mount->mnt_flag & MNT_SUJ) != 0)
-#define	MOUNTEDSUJ(mp)	   (((mp)->mnt_flag & MNT_SUJ) != 0)
+#define	MOUNTEDSOFTDEP(mp)	(((mp)->mnt_flag & MNT_SOFTDEP) != 0)
+#define	DOINGSOFTDEP(vp)	MOUNTEDSOFTDEP((vp)->v_mount)
+#define	MOUNTEDSUJ(mp)		(((mp)->mnt_flag & (MNT_SOFTDEP | MNT_SUJ)) == \
+    (MNT_SOFTDEP | MNT_SUJ))
+#define	DOINGSUJ(vp)		MOUNTEDSUJ((vp)->v_mount)
 
 /* This overlays the fid structure (see mount.h). */
 struct ufid {

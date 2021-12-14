@@ -1575,7 +1575,7 @@ SYSCTL_INT(_kern_cam_da, OID_AUTO, enable_biospeedup, CTLFLAG_RDTUN,
 	    &da_enable_biospeedup, 0, "Enable BIO_SPEEDUP processing");
 
 SYSCTL_PROC(_kern_cam_da, OID_AUTO, default_softtimeout,
-    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, NULL, 0,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE, NULL, 0,
     dasysctlsofttimeout, "I",
     "Soft I/O timeout (ms)");
 TUNABLE_INT64("kern.cam.da.default_softtimeout", &da_default_softtimeout);
@@ -2272,17 +2272,17 @@ dasysctlinit(void *context, int pending)
 	 */
 	SYSCTL_ADD_PROC(&softc->sysctl_ctx, SYSCTL_CHILDREN(softc->sysctl_tree),
 		OID_AUTO, "delete_method",
-		CTLTYPE_STRING | CTLFLAG_RWTUN | CTLFLAG_NEEDGIANT,
+		CTLTYPE_STRING | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
 		softc, 0, dadeletemethodsysctl, "A",
 		"BIO_DELETE execution method");
 	SYSCTL_ADD_PROC(&softc->sysctl_ctx, SYSCTL_CHILDREN(softc->sysctl_tree),
 		OID_AUTO, "delete_max",
-		CTLTYPE_U64 | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+		CTLTYPE_U64 | CTLFLAG_RW | CTLFLAG_MPSAFE,
 		softc, 0, dadeletemaxsysctl, "Q",
 		"Maximum BIO_DELETE size");
 	SYSCTL_ADD_PROC(&softc->sysctl_ctx, SYSCTL_CHILDREN(softc->sysctl_tree),
 		OID_AUTO, "minimum_cmd_size",
-		CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+		CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE,
 		&softc->minimum_cmd_size, 0, dacmdsizesysctl, "I",
 		"Minimum CDB size");
 	SYSCTL_ADD_UQUAD(&softc->sysctl_ctx,
@@ -2300,12 +2300,12 @@ dasysctlinit(void *context, int pending)
 
 	SYSCTL_ADD_PROC(&softc->sysctl_ctx, SYSCTL_CHILDREN(softc->sysctl_tree),
 		OID_AUTO, "zone_mode",
-		CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+		CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
 		softc, 0, dazonemodesysctl, "A",
 		"Zone Mode");
 	SYSCTL_ADD_PROC(&softc->sysctl_ctx, SYSCTL_CHILDREN(softc->sysctl_tree),
 		OID_AUTO, "zone_support",
-		CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+		CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
 		softc, 0, dazonesupsysctl, "A",
 		"Zone Support");
 	SYSCTL_ADD_UQUAD(&softc->sysctl_ctx,
@@ -2849,7 +2849,7 @@ daregister(struct cam_periph *periph, void *arg)
 	TASK_INIT(&softc->sysctl_task, 0, dasysctlinit, periph);
 
 	/*
-	 * Take an exclusive section lock qon the periph while dastart is called
+	 * Take an exclusive section lock on the periph while dastart is called
 	 * to finish the probe.  The lock will be dropped in dadone at the end
 	 * of probe. This locks out daopen and daclose from racing with the
 	 * probe.
@@ -2914,7 +2914,8 @@ daregister(struct cam_periph *periph, void *arg)
 	softc->disk->d_open = daopen;
 	softc->disk->d_close = daclose;
 	softc->disk->d_strategy = dastrategy;
-	softc->disk->d_dump = dadump;
+	if (cam_sim_pollable(periph->sim))
+		softc->disk->d_dump = dadump;
 	softc->disk->d_getattr = dagetattr;
 	softc->disk->d_gone = dadiskgonecb;
 	softc->disk->d_name = "da";
@@ -3649,14 +3650,14 @@ out:
 	}
 	case DA_STATE_PROBE_BDC:
 	{
-		struct scsi_vpd_block_characteristics *bdc;
+		struct scsi_vpd_block_device_characteristics *bdc;
 
 		if (!scsi_vpd_supported_page(periph, SVPD_BDC)) {
 			softc->state = DA_STATE_PROBE_ATA;
 			goto skipstate;
 		}
 
-		bdc = (struct scsi_vpd_block_characteristics *)
+		bdc = (struct scsi_vpd_block_device_characteristics *)
 			malloc(sizeof(*bdc), M_SCSIDA, M_NOWAIT|M_ZERO);
 
 		if (bdc == NULL) {
@@ -4468,7 +4469,7 @@ dazonedone(struct cam_periph *periph, union ccb *ccb)
 			/*
 			 * NOTE: we're mapping the values here directly
 			 * from the SCSI/ATA bit definitions to the bio.h
-			 * definitons.  There is also a warning in
+			 * definitions. There is also a warning in
 			 * disk_zone.h, but the impact is that if
 			 * additional values are added in the SCSI/ATA
 			 * specs these will be visible to consumers of
@@ -4515,13 +4516,11 @@ dadone(struct cam_periph *periph, union ccb *done_ccb)
 	struct bio *bp, *bp1;
 	struct da_softc *softc;
 	struct ccb_scsiio *csio;
-	u_int32_t  priority;
 	da_ccb_state state;
 
 	CAM_DEBUG(periph->path, CAM_DEBUG_TRACE, ("dadone\n"));
 
 	softc = (struct da_softc *)periph->softc;
-	priority = done_ccb->ccb_h.pinfo.priority;
 	csio = &done_ccb->csio;
 
 #if defined(BUF_TRACKING) || defined(FULL_BUF_TRACKING)
@@ -5207,8 +5206,7 @@ dadone_probebdc(struct cam_periph *periph, union ccb *done_ccb)
 		    medium_rotation_rate)) {
 			softc->disk->d_rotation_rate =
 				scsi_2btoul(bdc->medium_rotation_rate);
-			if (softc->disk->d_rotation_rate ==
-			    SVPD_BDC_RATE_NON_ROTATING) {
+			if (softc->disk->d_rotation_rate == SVPD_NON_ROTATING) {
 				cam_iosched_set_sort_queue(
 				    softc->cam_iosched, 0);
 				softc->flags &= ~DA_FLAG_ROTATING;
@@ -5286,7 +5284,6 @@ dadone_probeata(struct cam_periph *periph, union ccb *done_ccb)
 	u_int32_t  priority;
 	int continue_probe;
 	int error;
-	int16_t *ptr;
 
 	CAM_DEBUG(periph->path, CAM_DEBUG_TRACE, ("dadone_probeata\n"));
 
@@ -5294,7 +5291,6 @@ dadone_probeata(struct cam_periph *periph, union ccb *done_ccb)
 	priority = done_ccb->ccb_h.pinfo.priority;
 	csio = &done_ccb->csio;
 	ata_params = (struct ata_params *)csio->data_ptr;
-	ptr = (uint16_t *)ata_params;
 	continue_probe = 0;
 	error = 0;
 
@@ -5879,12 +5875,10 @@ static void
 dadone_tur(struct cam_periph *periph, union ccb *done_ccb)
 {
 	struct da_softc *softc;
-	struct ccb_scsiio *csio;
 
 	CAM_DEBUG(periph->path, CAM_DEBUG_TRACE, ("dadone_tur\n"));
 
 	softc = (struct da_softc *)periph->softc;
-	csio = &done_ccb->csio;
 
 	cam_periph_assert(periph, MA_OWNED);
 

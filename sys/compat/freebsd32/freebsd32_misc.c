@@ -920,6 +920,7 @@ freebsd32_ptrace(struct thread *td, struct freebsd32_ptrace_args *uap)
 		struct ptrace_io_desc piod;
 		struct ptrace_lwpinfo pl;
 		struct ptrace_vm_entry pve;
+		struct ptrace_coredump pc;
 		struct dbreg32 dbreg;
 		struct fpreg32 fpreg;
 		struct reg32 reg;
@@ -931,6 +932,7 @@ freebsd32_ptrace(struct thread *td, struct freebsd32_ptrace_args *uap)
 		struct ptrace_io_desc32 piod;
 		struct ptrace_lwpinfo32 pl;
 		struct ptrace_vm_entry32 pve;
+		struct ptrace_coredump32 pc;
 		uint32_t args[nitems(td->td_sa.args)];
 		struct ptrace_sc_ret32 psr;
 	} r32;
@@ -1008,6 +1010,16 @@ freebsd32_ptrace(struct thread *td, struct freebsd32_ptrace_args *uap)
 		CP(r32.pve, r.pve, pve_fileid);
 		CP(r32.pve, r.pve, pve_fsid);
 		PTRIN_CP(r32.pve, r.pve, pve_path);
+		break;
+	case PT_COREDUMP:
+		if (uap->data != sizeof(r32.pc))
+			error = EINVAL;
+		else
+			error = copyin(uap->addr, &r32.pc, uap->data);
+		CP(r32.pc, r.pc, pc_fd);
+		CP(r32.pc, r.pc, pc_flags);
+		r.pc.pc_limit = PAIR32TO64(off_t, r32.pc.pc_limit);
+		data = sizeof(r.pc);
 		break;
 	default:
 		addr = uap->addr;
@@ -1388,28 +1400,18 @@ exit:
 }
 
 int
-freebsd32_recvmsg(td, uap)
-	struct thread *td;
-	struct freebsd32_recvmsg_args /* {
-		int	s;
-		struct	msghdr32 *msg;
-		int	flags;
-	} */ *uap;
+freebsd32_recvmsg(struct thread *td, struct freebsd32_recvmsg_args *uap)
 {
 	struct msghdr msg;
-	struct msghdr32 m32;
 	struct iovec *uiov, *iov;
 	struct mbuf *control = NULL;
 	struct mbuf **controlp;
-
 	int error;
-	error = copyin(uap->msg, &m32, sizeof(m32));
-	if (error)
-		return (error);
+
 	error = freebsd32_copyinmsghdr(uap->msg, &msg);
 	if (error)
 		return (error);
-	error = freebsd32_copyiniov(PTRIN(m32.msg_iov), m32.msg_iovlen, &iov,
+	error = freebsd32_copyiniov((void *)msg.msg_iov, msg.msg_iovlen, &iov,
 	    EMSGSIZE);
 	if (error)
 		return (error);
@@ -1539,23 +1541,18 @@ out:
 }
 
 int
-freebsd32_sendmsg(struct thread *td,
-		  struct freebsd32_sendmsg_args *uap)
+freebsd32_sendmsg(struct thread *td, struct freebsd32_sendmsg_args *uap)
 {
 	struct msghdr msg;
-	struct msghdr32 m32;
 	struct iovec *iov;
 	struct mbuf *control = NULL;
 	struct sockaddr *to = NULL;
 	int error;
 
-	error = copyin(uap->msg, &m32, sizeof(m32));
-	if (error)
-		return (error);
 	error = freebsd32_copyinmsghdr(uap->msg, &msg);
 	if (error)
 		return (error);
-	error = freebsd32_copyiniov(PTRIN(m32.msg_iov), m32.msg_iovlen, &iov,
+	error = freebsd32_copyiniov((void *)msg.msg_iov, msg.msg_iovlen, &iov,
 	    EMSGSIZE);
 	if (error)
 		return (error);
@@ -3619,6 +3616,8 @@ freebsd32_procctl(struct thread *td, struct freebsd32_procctl_args *uap)
 	case PROC_STACKGAP_CTL:
 	case PROC_TRACE_CTL:
 	case PROC_TRAPCAP_CTL:
+	case PROC_NO_NEW_PRIVS_CTL:
+	case PROC_WXMAP_CTL:
 		error = copyin(PTRIN(uap->data), &flags, sizeof(flags));
 		if (error != 0)
 			return (error);
@@ -3652,6 +3651,8 @@ freebsd32_procctl(struct thread *td, struct freebsd32_procctl_args *uap)
 	case PROC_STACKGAP_STATUS:
 	case PROC_TRACE_STATUS:
 	case PROC_TRAPCAP_STATUS:
+	case PROC_NO_NEW_PRIVS_STATUS:
+	case PROC_WXMAP_STATUS:
 		data = &flags;
 		break;
 	case PROC_PDEATHSIG_CTL:
@@ -3683,6 +3684,8 @@ freebsd32_procctl(struct thread *td, struct freebsd32_procctl_args *uap)
 	case PROC_STACKGAP_STATUS:
 	case PROC_TRACE_STATUS:
 	case PROC_TRAPCAP_STATUS:
+	case PROC_NO_NEW_PRIVS_STATUS:
+	case PROC_WXMAP_STATUS:
 		if (error == 0)
 			error = copyout(&flags, uap->data, sizeof(flags));
 		break;
@@ -3713,6 +3716,7 @@ freebsd32_fcntl(struct thread *td, struct freebsd32_fcntl_args *uap)
 	case F_OGETLK:
 	case F_OSETLK:
 	case F_OSETLKW:
+	case F_KINFO:
 		tmp = (unsigned int)(uap->arg);
 		break;
 	default:

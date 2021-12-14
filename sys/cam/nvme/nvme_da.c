@@ -375,10 +375,8 @@ ndaioctl(struct disk *dp, u_long cmd, void *data, int fflag,
     struct thread *td)
 {
 	struct cam_periph *periph;
-	struct nda_softc *softc;
 
 	periph = (struct cam_periph *)dp->d_drv1;
-	softc = (struct nda_softc *)periph->softc;
 
 	switch (cmd) {
 	case NVME_IO_TEST:
@@ -898,7 +896,8 @@ ndaregister(struct cam_periph *periph, void *arg)
 	disk->d_strategy = ndastrategy;
 	disk->d_ioctl = ndaioctl;
 	disk->d_getattr = ndagetattr;
-	disk->d_dump = ndadump;
+	if (cam_sim_pollable(periph->sim))
+		disk->d_dump = ndadump;
 	disk->d_gone = ndadiskgonecb;
 	disk->d_name = "nda";
 	disk->d_drv1 = periph;
@@ -1268,11 +1267,13 @@ ndadone(struct cam_periph *periph, union ccb *done_ccb)
 static int
 ndaerror(union ccb *ccb, u_int32_t cam_flags, u_int32_t sense_flags)
 {
+#ifdef CAM_IO_STATS
 	struct nda_softc *softc;
 	struct cam_periph *periph;
 
 	periph = xpt_path_periph(ccb->ccb_h.path);
 	softc = (struct nda_softc *)periph->softc;
+#endif
 
 	switch (ccb->ccb_h.status & CAM_STATUS_MASK) {
 	case CAM_CMD_TIMEOUT:

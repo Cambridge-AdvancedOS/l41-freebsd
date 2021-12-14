@@ -482,8 +482,6 @@ sdp_attach(struct socket *so, int proto, struct thread *td)
 	LIST_INSERT_HEAD(&sdp_list, ssk, list);
 	sdp_count++;
 	SDP_LIST_WUNLOCK();
-	if ((so->so_options & SO_LINGER) && so->so_linger == 0)
-		so->so_linger = TCP_LINGERTIME;
 
 	return (0);
 }
@@ -521,9 +519,9 @@ sdp_bind(struct socket *so, struct sockaddr *nam, struct thread *td)
 	struct sockaddr_in *sin;
 
 	sin = (struct sockaddr_in *)nam;
-	if (nam->sa_len != sizeof (*sin))
-		return (EINVAL);
 	if (sin->sin_family != AF_INET)
+		return (EAFNOSUPPORT);
+	if (nam->sa_len != sizeof(*sin))
 		return (EINVAL);
 	if (IN_MULTICAST(ntohl(sin->sin_addr.s_addr)))
 		return (EAFNOSUPPORT);
@@ -619,10 +617,10 @@ sdp_connect(struct socket *so, struct sockaddr *nam, struct thread *td)
 	struct sockaddr_in *sin;
 
 	sin = (struct sockaddr_in *)nam;
-	if (nam->sa_len != sizeof (*sin))
+	if (nam->sa_len != sizeof(*sin))
 		return (EINVAL);
 	if (sin->sin_family != AF_INET)
-		return (EINVAL);
+		return (EAFNOSUPPORT);
 	if (IN_MULTICAST(ntohl(sin->sin_addr.s_addr)))
 		return (EAFNOSUPPORT);
 	if ((error = prison_remote_ip4(td->td_ucred, &sin->sin_addr)) != 0)
@@ -934,6 +932,21 @@ sdp_send(struct socket *so, int flags, struct mbuf *m,
 	int error;
 	int cnt;
 
+	if (nam != NULL) {
+		if (nam->sa_family != AF_INET) {
+			if (control)
+				m_freem(control);
+			m_freem(m);
+			return (EAFNOSUPPORT);
+		}
+		if (nam->sa_len != sizeof(struct sockaddr_in)) {
+			if (control)
+				m_freem(control);
+			m_freem(m);
+			return (EINVAL);
+		}
+	}
+
 	error = 0;
 	ssk = sdp_sk(so);
 	KASSERT(m->m_flags & M_PKTHDR,
@@ -1034,8 +1047,6 @@ out:
 	return (error);
 }
 
-#define	SBLOCKWAIT(f)	(((f) & MSG_DONTWAIT) ? 0 : SBL_WAIT)
-
 /*
  * Send on a socket.  If send must go all at once and message is larger than
  * send buffering, then hard error.  Lock against other senders.  If must go
@@ -1092,7 +1103,7 @@ sdp_sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 		td->td_ru.ru_msgsnd++;
 
 	ssk = sdp_sk(so);
-	error = sblock(&so->so_snd, SBLOCKWAIT(flags));
+	error = SOCK_IO_SEND_LOCK(so, SBLOCKWAIT(flags));
 	if (error)
 		goto out;
 
@@ -1183,7 +1194,7 @@ restart:
 	} while (resid);
 
 release:
-	sbunlock(&so->so_snd);
+	SOCK_IO_SEND_UNLOCK(so);
 out:
 	if (top != NULL)
 		m_freem(top);
@@ -1254,9 +1265,9 @@ sdp_sorecv(struct socket *so, struct sockaddr **psa, struct uio *uio,
 	ssk = sdp_sk(so);
 
 	/* Prevent other readers from entering the socket. */
-	error = sblock(sb, SBLOCKWAIT(flags));
+	error = SOCK_IO_RECV_LOCK(so, SBLOCKWAIT(flags));
 	if (error)
-		goto out;
+		return (error);
 	SOCKBUF_LOCK(sb);
 
 	/* Easy one, no space to copyout anything. */
@@ -1410,11 +1421,10 @@ deliver:
 	if ((flags & MSG_WAITALL) && uio->uio_resid > 0)
 		goto restart;
 out:
-	SOCKBUF_LOCK_ASSERT(sb);
 	SBLASTRECORDCHK(sb);
 	SBLASTMBUFCHK(sb);
 	SOCKBUF_UNLOCK(sb);
-	sbunlock(sb);
+	SOCK_IO_RECV_UNLOCK(so);
 	return (error);
 }
 

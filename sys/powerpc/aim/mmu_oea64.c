@@ -438,7 +438,7 @@ static int moea64_map_user_ptr(pmap_t pm,
     volatile const void *uaddr, void **kaddr, size_t ulen, size_t *klen);
 static int moea64_decode_kernel_ptr(vm_offset_t addr,
     int *is_user, vm_offset_t *decoded_addr);
-static size_t moea64_scan_pmap(void);
+static size_t moea64_scan_pmap(struct bitset *dump_bitset);
 static void *moea64_dump_pmap_init(unsigned blkpgs);
 #ifdef __powerpc64__
 static void moea64_page_array_startup(long);
@@ -1400,13 +1400,15 @@ moea64_mincore(pmap_t pmap, vm_offset_t addr, vm_paddr_t *pap)
 
 	PMAP_LOCK(pmap);
 
-	/* XXX Add support for superpages */
 	pvo = moea64_pvo_find_va(pmap, addr);
 	if (pvo != NULL) {
 		pa = PVO_PADDR(pvo);
 		m = PHYS_TO_VM_PAGE(pa);
 		managed = (pvo->pvo_vaddr & PVO_MANAGED) == PVO_MANAGED;
-		val = MINCORE_INCORE;
+		if (PVO_IS_SP(pvo))
+			val = MINCORE_INCORE | MINCORE_PSIND(1);
+		else
+			val = MINCORE_INCORE;
 	} else {
 		PMAP_UNLOCK(pmap);
 		return (0);
@@ -1920,8 +1922,8 @@ moea64_uma_page_alloc(uma_zone_t zone, vm_size_t bytes, int domain,
 	*flags = UMA_SLAB_PRIV;
 	needed_lock = !PMAP_LOCKED(kernel_pmap);
 
-	m = vm_page_alloc_domain(NULL, 0, domain,
-	    malloc2vm_flags(wait) | VM_ALLOC_WIRED | VM_ALLOC_NOOBJ);
+	m = vm_page_alloc_noobj_domain(domain, malloc2vm_flags(wait) |
+	    VM_ALLOC_WIRED);
 	if (m == NULL)
 		return (NULL);
 
@@ -1942,9 +1944,6 @@ moea64_uma_page_alloc(uma_zone_t zone, vm_size_t bytes, int domain,
 
 	if (needed_lock)
 		PMAP_UNLOCK(kernel_pmap);
-
-	if ((wait & M_ZERO) && (m->flags & PG_ZERO) == 0)
-                bzero((void *)va, PAGE_SIZE);
 
 	return (void *)va;
 }
@@ -3325,7 +3324,7 @@ moea64_scan_init()
 #ifdef __powerpc64__
 
 static size_t
-moea64_scan_pmap()
+moea64_scan_pmap(struct bitset *dump_bitset)
 {
 	struct pvo_entry *pvo;
 	vm_paddr_t pa, pa_end;
@@ -3367,12 +3366,12 @@ moea64_scan_pmap()
 		if (va & PVO_LARGE) {
 			pa_end = pa + lpsize;
 			for (; pa < pa_end; pa += PAGE_SIZE) {
-				if (is_dumpable(pa))
-					dump_add_page(pa);
+				if (vm_phys_is_dumpable(pa))
+					vm_page_dump_add(dump_bitset, pa);
 			}
 		} else {
-			if (is_dumpable(pa))
-				dump_add_page(pa);
+			if (vm_phys_is_dumpable(pa))
+				vm_page_dump_add(dump_bitset, pa);
 		}
 	}
 	PMAP_UNLOCK(kernel_pmap);
@@ -3394,7 +3393,7 @@ moea64_dump_pmap_init(unsigned blkpgs)
 #else
 
 static size_t
-moea64_scan_pmap()
+moea64_scan_pmap(struct bitset *dump_bitset __unused)
 {
 	return (0);
 }
@@ -3717,7 +3716,7 @@ moea64_sp_enter(pmap_t pmap, vm_offset_t va, vm_page_t m,
 		pvo = pvos[i];
 
 		pvo->pvo_pte.prot = prot;
-		pvo->pvo_pte.pa = (pa & ~LPTE_LP_MASK) | LPTE_LP_4K_16M |
+		pvo->pvo_pte.pa = (pa & ~HPT_SP_MASK) | LPTE_LP_4K_16M |
 		    moea64_calc_wimg(pa, pmap_page_get_memattr(m));
 
 		if ((flags & PMAP_ENTER_WIRED) != 0)
@@ -3874,7 +3873,7 @@ moea64_sp_promote(pmap_t pmap, vm_offset_t va, vm_page_t m)
 	for (pvo = first, va_end = PVO_VADDR(pvo) + HPT_SP_SIZE;
 	    pvo != NULL && PVO_VADDR(pvo) < va_end;
 	    pvo = RB_NEXT(pvo_tree, &pmap->pmap_pvo, pvo)) {
-		pvo->pvo_pte.pa &= ~LPTE_LP_MASK;
+		pvo->pvo_pte.pa &= ADDR_POFF | ~HPT_SP_MASK;
 		pvo->pvo_pte.pa |= LPTE_LP_4K_16M;
 		pvo->pvo_vaddr |= PVO_LARGE;
 	}

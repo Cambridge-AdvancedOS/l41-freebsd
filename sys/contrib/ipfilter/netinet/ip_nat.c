@@ -5312,9 +5312,7 @@ ipf_nat_out(fin, nat, natadd, nflags)
 	/* ------------------------------------------------------------- */
 	if ((np != NULL) && (np->in_apr != NULL)) {
 		i = ipf_proxy_check(fin, nat);
-		if (i == 0) {
-			i = 1;
-		} else if (i == -1) {
+		if (i == -1) {
 			NBUMPSIDED(1, ns_ipf_proxy_fail);
 		}
 	} else {
@@ -6245,7 +6243,7 @@ ipf_nat_rule_deref(softc, inp)
 
 	if (n->in_tqehead[0] != NULL) {
 		if (ipf_deletetimeoutqueue(n->in_tqehead[0]) == 0) {
-			ipf_freetimeoutqueue(softc, n->in_tqehead[1]);
+			ipf_freetimeoutqueue(softc, n->in_tqehead[0]);
 		}
 	}
 

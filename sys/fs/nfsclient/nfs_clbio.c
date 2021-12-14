@@ -94,7 +94,7 @@ ncl_gbp_getblkno(struct vnode *vp, vm_ooffset_t off)
 }
 
 static int
-ncl_gbp_getblksz(struct vnode *vp, daddr_t lbn)
+ncl_gbp_getblksz(struct vnode *vp, daddr_t lbn, long *sz)
 {
 	struct nfsnode *np;
 	u_quad_t nsize;
@@ -111,7 +111,8 @@ ncl_gbp_getblksz(struct vnode *vp, daddr_t lbn)
 		bcount = 0;
 	else if ((off_t)(lbn + 1) * biosize > nsize)
 		bcount = nsize - (off_t)lbn * biosize;
-	return (bcount);
+	*sz = bcount;
+	return (0);
 }
 
 int
@@ -584,11 +585,14 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		break;
 	    case VDIR:
 		NFSINCRGLOBAL(nfsstatsv1.biocache_readdirs);
+		NFSLOCKNODE(np);
 		if (np->n_direofoffset
 		    && uio->uio_offset >= np->n_direofoffset) {
+			NFSUNLOCKNODE(np);
 			error = 0;
 			goto out;
 		}
+		NFSUNLOCKNODE(np);
 		lbn = (uoff_t)uio->uio_offset / NFS_DIRBLKSIZ;
 		on = uio->uio_offset & (NFS_DIRBLKSIZ - 1);
 		bp = nfs_getcacheblk(vp, lbn, NFS_DIRBLKSIZ, td);
@@ -620,11 +624,14 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 			 * NFSERR_BAD_COOKIE (double yuch!).
 			 */
 			for (i = 0; i <= lbn && !error; i++) {
+			    NFSLOCKNODE(np);
 			    if (np->n_direofoffset
 				&& (i * NFS_DIRBLKSIZ) >= np->n_direofoffset) {
+				    NFSUNLOCKNODE(np);
 				    error = 0;
 				    goto out;
 			    }
+			    NFSUNLOCKNODE(np);
 			    bp = nfs_getcacheblk(vp, i, NFS_DIRBLKSIZ, td);
 			    if (!bp) {
 				error = newnfs_sigintr(nmp, td);
@@ -667,11 +674,13 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		 * (You need the current block first, so that you have the
 		 *  directory offset cookie of the next block.)
 		 */
+		NFSLOCKNODE(np);
 		if (nmp->nm_readahead > 0 &&
 		    (bp->b_flags & B_INVAL) == 0 &&
 		    (np->n_direofoffset == 0 ||
 		    (lbn + 1) * NFS_DIRBLKSIZ < np->n_direofoffset) &&
 		    incore(&vp->v_bufobj, lbn + 1) == NULL) {
+			NFSUNLOCKNODE(np);
 			rabp = nfs_getcacheblk(vp, lbn + 1, NFS_DIRBLKSIZ, td);
 			if (rabp) {
 			    if ((rabp->b_flags & (B_CACHE|B_DELWRI)) == 0) {
@@ -688,6 +697,7 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 				brelse(rabp);
 			    }
 			}
+			NFSLOCKNODE(np);
 		}
 		/*
 		 * Unlike VREG files, whos buffer size ( bp->b_bcount ) is
@@ -704,6 +714,7 @@ ncl_bioread(struct vnode *vp, struct uio *uio, int ioflag, struct ucred *cred)
 		n = lmin(uio->uio_resid, NFS_DIRBLKSIZ - bp->b_resid - on);
 		if (np->n_direofoffset && n > np->n_direofoffset - uio->uio_offset)
 			n = np->n_direofoffset - uio->uio_offset;
+		NFSUNLOCKNODE(np);
 		break;
 	    default:
 		printf(" ncl_bioread: type %x unexpected\n", vp->v_type);
@@ -893,9 +904,10 @@ ncl_write(struct vop_write_args *ap)
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
 	daddr_t lbn;
 	int bcount, noncontig_write, obcount;
-	int bp_cached, n, on, error = 0, error1, wouldcommit;
+	int bp_cached, n, on, error = 0, error1, save2, wouldcommit;
 	size_t orig_resid, local_resid;
 	off_t orig_size, tmp_off;
+	struct timespec ts;
 
 	KASSERT(uio->uio_rw == UIO_WRITE, ("ncl_write mode"));
 	KASSERT(uio->uio_segflg != UIO_USERSPACE || uio->uio_td == curthread,
@@ -985,6 +997,7 @@ ncl_write(struct vop_write_args *ap)
 	if (vn_rlimit_fsize(vp, uio, td))
 		return (EFBIG);
 
+	save2 = curthread_pflags2_set(TDP2_SBPAGES);
 	biosize = vp->v_bufobj.bo_bsize;
 	/*
 	 * Find all of this file's B_NEEDCOMMIT buffers.  If our writes
@@ -1023,7 +1036,7 @@ ncl_write(struct vop_write_args *ap)
 				error = ncl_vinvalbuf(vp, V_SAVE | ((ioflag &
 				    IO_VMIO) != 0 ? V_VMIO : 0), td, 1);
 				if (error != 0)
-					return (error);
+					goto out;
 				wouldcommit = biosize;
 			}
 		}
@@ -1063,6 +1076,7 @@ again:
 				NFSLOCKNODE(np);
 				np->n_size = uio->uio_offset + n;
 				np->n_flag |= NMODIFIED;
+				np->n_flag &= ~NVNSETSZSKIP;
 				vnode_pager_setsize(vp, np->n_size);
 				NFSUNLOCKNODE(np);
 
@@ -1092,6 +1106,7 @@ again:
 			if (uio->uio_offset + n > np->n_size) {
 				np->n_size = uio->uio_offset + n;
 				np->n_flag |= NMODIFIED;
+				np->n_flag &= ~NVNSETSZSKIP;
 				vnode_pager_setsize(vp, np->n_size);
 			}
 			NFSUNLOCKNODE(np);
@@ -1270,7 +1285,12 @@ again:
 			break;
 	} while (uio->uio_resid > 0 && n > 0);
 
-	if (error != 0) {
+	if (error == 0) {
+		nanouptime(&ts);
+		NFSLOCKNODE(np);
+		np->n_localmodtime = ts;
+		NFSUNLOCKNODE(np);
+	} else {
 		if (ioflag & IO_UNIT) {
 			VATTR_NULL(&vattr);
 			vattr.va_size = orig_size;
@@ -1281,6 +1301,8 @@ again:
 		}
 	}
 
+out:
+	curthread_pflags2_restore(save2);
 	return (error);
 }
 
@@ -1340,6 +1362,7 @@ ncl_vinvalbuf(struct vnode *vp, int flags, struct thread *td, int intrflg)
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
 	int error = 0, slpflag, slptimeo;
 	bool old_lock;
+	struct timespec ts;
 
 	ASSERT_VOP_LOCKED(vp, "ncl_vinvalbuf");
 
@@ -1384,16 +1407,21 @@ ncl_vinvalbuf(struct vnode *vp, int flags, struct thread *td, int intrflg)
 	}
 	if (NFSHASPNFS(nmp)) {
 		nfscl_layoutcommit(vp, td);
+		nanouptime(&ts);
 		/*
 		 * Invalidate the attribute cache, since writes to a DS
 		 * won't update the size attribute.
 		 */
 		NFSLOCKNODE(np);
 		np->n_attrstamp = 0;
-	} else
+	} else {
+		nanouptime(&ts);
 		NFSLOCKNODE(np);
-	if (np->n_directio_asyncwr == 0)
+	}
+	if (np->n_directio_asyncwr == 0 && (np->n_flag & NMODIFIED) != 0) {
+		np->n_localmodtime = ts;
 		np->n_flag &= ~NMODIFIED;
+	}
 	NFSUNLOCKNODE(np);
 out:
 	ncl_excl_finish(vp, old_lock);
@@ -1710,7 +1738,7 @@ ncl_doio(struct vnode *vp, struct buf *bp, struct ucred *cr, struct thread *td,
 		    off = ((u_quad_t)bp->b_blkno) * DEV_BSIZE + bp->b_dirtyoff;
 		    retv = ncl_commit(vp, off, bp->b_dirtyend-bp->b_dirtyoff,
 			bp->b_wcred, td);
-		    if (retv == 0) {
+		    if (NFSCL_FORCEDISM(vp->v_mount) || retv == 0) {
 			    bp->b_dirtyoff = bp->b_dirtyend = 0;
 			    bp->b_flags &= ~(B_NEEDCOMMIT | B_CLUSTEROK);
 			    bp->b_resid = 0;

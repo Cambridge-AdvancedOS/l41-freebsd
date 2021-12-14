@@ -46,6 +46,7 @@ M=		${MACHINE}
 
 AWK?=		awk
 CP?=		cp
+ELFDUMP?=	elfdump
 NM?=		nm
 OBJCOPY?=	objcopy
 SIZE?=		size
@@ -90,7 +91,7 @@ WERROR?=	-Werror
 CFLAGS+=	-fno-common
 
 # XXX LOCORE means "don't declare C stuff" not "for locore.s".
-ASM_CFLAGS= -x assembler-with-cpp -DLOCORE ${CFLAGS} ${ASM_CFLAGS.${.IMPSRC:T}} 
+ASM_CFLAGS= -x assembler-with-cpp -DLOCORE ${CFLAGS} ${ASM_CFLAGS.${.IMPSRC:T}}
 
 .if defined(PROFLEVEL) && ${PROFLEVEL} >= 1
 CFLAGS+=	-DGPROF
@@ -107,9 +108,28 @@ PROF=		-pg
 .endif
 DEFINED_PROF=	${PROF}
 
+COMPAT_FREEBSD32_ENABLED!= grep COMPAT_FREEBSD32 opt_global.h || true ; echo
+
+KASAN_ENABLED!=	grep KASAN opt_global.h || true ; echo
+.if !empty(KASAN_ENABLED)
+SAN_CFLAGS+=	-fsanitize=kernel-address \
+		-mllvm -asan-stack=true \
+		-mllvm -asan-instrument-dynamic-allocas=true \
+		-mllvm -asan-globals=true \
+		-mllvm -asan-use-after-scope=true \
+		-mllvm -asan-instrumentation-with-call-threshold=0 \
+		-mllvm -asan-instrument-byval=false
+.endif
+
 KCSAN_ENABLED!=	grep KCSAN opt_global.h || true ; echo
 .if !empty(KCSAN_ENABLED)
 SAN_CFLAGS+=	-fsanitize=thread
+.endif
+
+KMSAN_ENABLED!= grep KMSAN opt_global.h || true ; echo
+.if !empty(KMSAN_ENABLED)
+SAN_CFLAGS+=	-DSAN_NEEDS_INTERCEPTORS -DSAN_INTERCEPTOR_PREFIX=kmsan \
+		-fsanitize=kernel-memory
 .endif
 
 KUBSAN_ENABLED!=	grep KUBSAN opt_global.h || true ; echo
@@ -192,7 +212,7 @@ NORMAL_FWO= ${CC:N${CCACHE_BIN}} -c ${ASM_CFLAGS} ${WERROR} -o ${.TARGET} \
 # for ZSTD in the kernel (include zstd/lib/freebsd before other CFLAGS)
 ZSTD_C= ${CC} -c -DZSTD_HEAPMODE=1 -I$S/contrib/zstd/lib/freebsd ${CFLAGS} \
 	-I$S/contrib/zstd/lib -I$S/contrib/zstd/lib/common ${WERROR} \
-	-Wno-inline -Wno-missing-prototypes ${PROF} -U__BMI__ \
+	-Wno-missing-prototypes ${PROF} -U__BMI__ \
 	-DZSTD_NO_INTRINSICS \
 	${.IMPSRC}
 # https://github.com/facebook/zstd/commit/812e8f2a [zstd 1.4.1]
@@ -222,7 +242,6 @@ CDDL_CFLAGS=	\
 	${CFLAGS} \
 	-Wno-cast-qual \
 	-Wno-duplicate-decl-specifier \
-	-Wno-inline \
 	-Wno-missing-braces \
 	-Wno-missing-prototypes \
 	-Wno-nested-externs \

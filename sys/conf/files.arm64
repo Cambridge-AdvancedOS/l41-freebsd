@@ -48,6 +48,7 @@ arm64/arm64/efirt_machdep.c			optional efirt
 arm64/arm64/elf32_machdep.c			optional compat_freebsd32
 arm64/arm64/elf_machdep.c			standard
 arm64/arm64/exception.S				standard
+arm64/arm64/exec_machdep.c			standard
 arm64/arm64/freebsd32_machdep.c			optional compat_freebsd32
 arm64/arm64/gdb_machdep.c			optional gdb
 arm64/arm64/gicv3_its.c				optional intrng fdt
@@ -55,7 +56,6 @@ arm64/arm64/gic_v3.c				standard
 arm64/arm64/gic_v3_acpi.c			optional acpi
 arm64/arm64/gic_v3_fdt.c			optional fdt
 arm64/arm64/identcpu.c				standard
-arm64/arm64/in_cksum.c				optional inet | inet6
 arm64/arm64/locore.S				standard no-obj
 arm64/arm64/machdep.c				standard
 arm64/arm64/machdep_boot.c			standard
@@ -67,6 +67,7 @@ arm64/arm64/mp_machdep.c			optional smp
 arm64/arm64/nexus.c				standard
 arm64/arm64/ofw_machdep.c			optional fdt
 arm64/arm64/pmap.c				standard
+arm64/arm64/ptrace_machdep.c			standard
 arm64/arm64/stack_machdep.c			optional ddb | stack
 arm64/arm64/support.S				standard
 arm64/arm64/swtch.S				standard
@@ -125,6 +126,10 @@ ghashv8-armx.o					optional armv8crypto	\
 
 crypto/des/des_enc.c				optional netsmb
 crypto/openssl/ossl_aarch64.c			optional ossl
+crypto/openssl/aarch64/chacha-armv8.S		optional ossl		\
+	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} ${WERROR} ${PROF} ${.IMPSRC}"
+crypto/openssl/aarch64/poly1305-armv8.S		optional ossl		\
+	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} ${WERROR} ${PROF} ${.IMPSRC}"
 crypto/openssl/aarch64/sha1-armv8.S		optional ossl		\
 	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} ${WERROR} ${PROF} ${.IMPSRC}"
 crypto/openssl/aarch64/sha256-armv8.S		optional ossl		\
@@ -201,8 +206,10 @@ dev/ice/ice_sriov.c				optional ice pci \
 	compile-with "${NORMAL_C} -I$S/dev/ice"
 dev/ice/ice_switch.c				optional ice pci \
 	compile-with "${NORMAL_C} -I$S/dev/ice"
+dev/ice/ice_vlan_mode.c		optional	ice pci \
+	compile-with "${NORMAL_C} -I$S/dev/ice"
 ice_ddp.c					optional ice_ddp	\
-	compile-with	"${AWK} -f $S/tools/fw_stub.awk ice_ddp.fw:ice_ddp:0x01031000 -mice_ddp -c${.TARGET}"	\
+	compile-with	"${AWK} -f $S/tools/fw_stub.awk ice_ddp.fw:ice_ddp:0x01031300 -mice_ddp -c${.TARGET}"	\
 	no-ctfconvert no-implicit-rule before-depend local	\
 	clean		"ice_ddp.c"
 ice_ddp.fwo					optional ice_ddp	\
@@ -211,8 +218,8 @@ ice_ddp.fwo					optional ice_ddp	\
 	no-implicit-rule				\
 	clean		"ice_ddp.fwo"
 ice_ddp.fw					optional ice_ddp	\
-	dependency	"$S/contrib/dev/ice/ice-1.3.16.0.pkg" \
-	compile-with	"${CP} $S/contrib/dev/ice/ice-1.3.16.0.pkg ice_ddp.fw" \
+	dependency	"$S/contrib/dev/ice/ice-1.3.19.0.pkg" \
+	compile-with	"${CP} $S/contrib/dev/ice/ice-1.3.19.0.pkg ice_ddp.fw" \
 	no-obj no-implicit-rule				\
 	clean		"ice_ddp.fw"
 
@@ -299,6 +306,7 @@ arm/allwinner/aw_mmc.c				optional mmc aw_mmc fdt | mmccam aw_mmc fdt
 arm/allwinner/aw_nmi.c				optional aw_nmi fdt \
 	compile-with "${NORMAL_C} -I$S/contrib/device-tree/include"
 arm/allwinner/aw_pwm.c				optional aw_pwm fdt
+arm/allwinner/aw_r_intc.c			optional aw_r_intc fdt
 arm/allwinner/aw_rsb.c				optional aw_rsb fdt
 arm/allwinner/aw_rtc.c				optional aw_rtc fdt
 arm/allwinner/aw_sid.c				optional aw_sid nvmem fdt

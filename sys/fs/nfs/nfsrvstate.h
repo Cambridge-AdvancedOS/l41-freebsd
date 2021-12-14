@@ -132,6 +132,7 @@ struct nfslayout {
 	nfsv4stateid_t		lay_stateid;
 	nfsquad_t		lay_clientid;
 	fhandle_t		lay_fh;
+	char			lay_deviceid[NFSX_V4DEVICEID];
 	fsid_t			lay_fsid;
 	uint32_t		lay_layoutlen;
 	uint16_t		lay_mirrorcnt;
@@ -147,6 +148,7 @@ struct nfslayout {
 #define	NFSLAY_RECALL	0x0004
 #define	NFSLAY_RETURNED	0x0008
 #define	NFSLAY_CALLB	0x0010
+#define	NFSLAY_NOSPC	0x0020
 
 /*
  * Structure for an NFSv4.1 session.
@@ -220,6 +222,7 @@ struct nfsstate {
 			time_t		expiry;
 			time_t		limit;
 			u_int64_t	compref;
+			time_t		last;
 		} deleg;
 	} ls_un;
 	struct nfslockfile	*ls_lfp;	/* Back pointer */
@@ -238,6 +241,7 @@ struct nfsstate {
 #define	ls_delegtime		ls_un.deleg.expiry
 #define	ls_delegtimelimit	ls_un.deleg.limit
 #define	ls_compref		ls_un.deleg.compref
+#define	ls_lastrecall		ls_un.deleg.last
 
 /*
  * Nfs lock structure.
@@ -351,6 +355,7 @@ struct nfsdevice {
 	char			*nfsdev_host;
 	fsid_t			nfsdev_mdsfsid;
 	uint32_t		nfsdev_nextdir;
+	bool			nfsdev_nospc;
 	vnode_t			nfsdev_dsdir[0];
 };
 

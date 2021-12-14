@@ -104,6 +104,8 @@ MALLOC_DECLARE(M_NVME);
 #define CACHE_LINE_SIZE		(64)
 #endif
 
+#define NVME_GONE		0xfffffffful
+
 extern int32_t		nvme_retry_count;
 extern bool		nvme_verbose_cmd_dump;
 
@@ -242,7 +244,7 @@ struct nvme_controller {
 	int			bar4_resource_id;
 	struct resource		*bar4_resource;
 
-	uint32_t		msix_enabled;
+	int			msi_count;
 	uint32_t		enable_aborts;
 
 	uint32_t		num_io_queues;
@@ -396,7 +398,6 @@ void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
 int	nvme_ctrlr_construct(struct nvme_controller *ctrlr, device_t dev);
 void	nvme_ctrlr_destruct(struct nvme_controller *ctrlr, device_t dev);
 void	nvme_ctrlr_shutdown(struct nvme_controller *ctrlr);
-int	nvme_ctrlr_hw_reset(struct nvme_controller *ctrlr);
 void	nvme_ctrlr_reset(struct nvme_controller *ctrlr);
 /* ctrlr defined as void * to allow use with config_intrhook. */
 void	nvme_ctrlr_start_config_hook(void *ctrlr_arg);
@@ -552,7 +553,7 @@ void	nvme_notify_fail_consumers(struct nvme_controller *ctrlr);
 void	nvme_notify_new_controller(struct nvme_controller *ctrlr);
 void	nvme_notify_ns(struct nvme_controller *ctrlr, int nsid);
 
-void	nvme_ctrlr_intx_handler(void *arg);
+void	nvme_ctrlr_shared_handler(void *arg);
 void	nvme_ctrlr_poll(struct nvme_controller *ctrlr);
 
 int	nvme_ctrlr_suspend(struct nvme_controller *ctrlr);

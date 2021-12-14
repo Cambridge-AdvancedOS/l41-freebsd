@@ -539,7 +539,6 @@ fuse_vfsop_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
 	struct fuse_entry_out *feo;
 	struct fuse_vnode_data *fvdat;
 	const char dot[] = ".";
-	off_t filesize;
 	enum vtype vtyp;
 	int error;
 
@@ -576,30 +575,10 @@ fuse_vfsop_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
 	error = fuse_vnode_get(mp, feo, nodeid, NULL, vpp, NULL, vtyp);
 	if (error)
 		goto out;
-	filesize = feo->attr.size;
-
-	/*
-	 * In the case where we are looking up a FUSE node represented by an
-	 * existing cached vnode, and the true size reported by FUSE_LOOKUP
-	 * doesn't match the vnode's cached size, then any cached writes beyond
-	 * the file's current size are lost.
-	 *
-	 * We can get here:
-	 * * following attribute cache expiration, or
-	 * * due a bug in the daemon, or
-	 */
 	fvdat = VTOFUD(*vpp);
-	if (vnode_isreg(*vpp) &&
-	    filesize != fvdat->cached_attrs.va_size &&
-	    fvdat->flag & FN_SIZECHANGE) {
-		printf("%s: WB cache incoherent on %s!\n", __func__,
-		    vnode_mount(*vpp)->mnt_stat.f_mntonname);
-
-		fvdat->flag &= ~FN_SIZECHANGE;
-	}
 
 	fuse_internal_cache_attrs(*vpp, &feo->attr, feo->attr_valid,
-		feo->attr_valid_nsec, NULL);
+		feo->attr_valid_nsec, NULL, true);
 	fuse_validity_2_bintime(feo->entry_valid, feo->entry_valid_nsec,
 		&fvdat->entry_cache_timeout);
 out:

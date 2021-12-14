@@ -174,7 +174,7 @@ struct vm {
 	struct mem_map	mem_maps[VM_MAX_MEMMAPS]; /* (i) guest address space */
 	struct mem_seg	mem_segs[VM_MAX_MEMSEGS]; /* (o) guest memory regions */
 	struct vmspace	*vmspace;		/* (o) guest's address space */
-	char		name[VM_MAX_NAMELEN];	/* (o) virtual machine name */
+	char		name[VM_MAX_NAMELEN+1];	/* (o) virtual machine name */
 	struct vcpu	vcpu[VM_MAXCPU];	/* (i) guest vcpus */
 	/* The following describe the vm cpu topology */
 	uint16_t	sockets;		/* (o) num of sockets */
@@ -480,7 +480,8 @@ vm_create(const char *name, struct vm **retvm)
 	if (!vmm_initialized)
 		return (ENXIO);
 
-	if (name == NULL || strlen(name) >= VM_MAX_NAMELEN)
+	if (name == NULL || strnlen(name, VM_MAX_NAMELEN + 1) ==
+	    VM_MAX_NAMELEN + 1)
 		return (EINVAL);
 
 	vmspace = vmmops_vmspace_alloc(0, VM_MAXUSER_ADDRESS_LA48);
@@ -795,6 +796,24 @@ vm_mmap_memseg(struct vm *vm, vm_paddr_t gpa, int segid, vm_ooffset_t first,
 	map->prot = prot;
 	map->flags = flags;
 	return (0);
+}
+
+int
+vm_munmap_memseg(struct vm *vm, vm_paddr_t gpa, size_t len)
+{
+	struct mem_map *m;
+	int i;
+
+	for (i = 0; i < VM_MAX_MEMMAPS; i++) {
+		m = &vm->mem_maps[i];
+		if (m->gpa == gpa && m->len == len &&
+		    (m->flags & VM_MEMMAP_F_IOMMU) == 0) {
+			vm_free_memmap(vm, i);
+			return (0);
+		}
+	}
+
+	return (EINVAL);
 }
 
 int

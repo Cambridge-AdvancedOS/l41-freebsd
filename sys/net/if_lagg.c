@@ -151,6 +151,7 @@ static int	lagg_snd_tag_modify(struct m_snd_tag *,
 static int	lagg_snd_tag_query(struct m_snd_tag *,
 		    union if_snd_tag_query_params *);
 static void	lagg_snd_tag_free(struct m_snd_tag *);
+static struct m_snd_tag *lagg_next_snd_tag(struct m_snd_tag *);
 static void     lagg_ratelimit_query(struct ifnet *,
 		    struct if_ratelimit_query_results *);
 #endif
@@ -585,6 +586,7 @@ lagg_clone_create(struct if_clone *ifc, int unit, caddr_t params)
 	ifp->if_snd_tag_modify = lagg_snd_tag_modify;
 	ifp->if_snd_tag_query = lagg_snd_tag_query;
 	ifp->if_snd_tag_free = lagg_snd_tag_free;
+	ifp->if_next_snd_tag = lagg_next_snd_tag;
 	ifp->if_ratelimit_query = lagg_ratelimit_query;
 #endif
 	ifp->if_capenable = ifp->if_capabilities = IFCAP_HWSTATS;
@@ -967,14 +969,16 @@ lagg_port_destroy(struct lagg_port *lp, int rundelport)
 			bcopy(lladdr, IF_LLADDR(sc->sc_ifp), sc->sc_ifp->if_addrlen);
 			lagg_proto_lladdr(sc);
 			EVENTHANDLER_INVOKE(iflladdr_event, sc->sc_ifp);
-		}
 
-		/*
-		 * Update lladdr for each port (new primary needs update
-		 * as well, to switch from old lladdr to its 'real' one)
-		 */
-		CK_SLIST_FOREACH(lp_ptr, &sc->sc_ports, lp_entries)
-			if_setlladdr(lp_ptr->lp_ifp, lladdr, lp_ptr->lp_ifp->if_addrlen);
+			/*
+			 * Update lladdr for each port (new primary needs update
+			 * as well, to switch from old lladdr to its 'real' one).
+			 * We can skip this if the lagg is being destroyed.
+			 */
+			CK_SLIST_FOREACH(lp_ptr, &sc->sc_ports, lp_entries)
+				if_setlladdr(lp_ptr->lp_ifp, lladdr,
+				    lp_ptr->lp_ifp->if_addrlen);
+		}
 	}
 
 	if (lp->lp_ifflags)
@@ -1793,12 +1797,9 @@ lagg_snd_tag_alloc(struct ifnet *ifp,
 {
 	struct epoch_tracker et;
 	struct lagg_snd_tag *lst;
-	struct lagg_softc *sc;
 	struct lagg_port *lp;
 	struct ifnet *lp_ifp;
 	int error;
-
-	sc = ifp->if_softc;
 
 	NET_EPOCH_ENTER(et);
 	lp = lookup_snd_tag_port(ifp, params->hdr.flowid,
@@ -1832,6 +1833,15 @@ lagg_snd_tag_alloc(struct ifnet *ifp,
 
 	*ppmt = &lst->com;
 	return (0);
+}
+
+static struct m_snd_tag *
+lagg_next_snd_tag(struct m_snd_tag *mst)
+{
+	struct lagg_snd_tag *lst;
+
+	lst = mst_to_lst(mst);
+	return (lst->tag);
 }
 
 static int

@@ -412,10 +412,22 @@
 #define	NFSPROC_RMEXTATTR	63
 #define	NFSPROC_LISTEXTATTR	64
 
+/* BindConnectionToSession, done by the krpc for a new connection. */
+#define	NFSPROC_BINDCONNTOSESS	65
+
+/* Do a Lookup+Open for "oneopenown". */
+#define	NFSPROC_LOOKUPOPEN	66
+
+/* Do an NFSv4.2 Deallocate. */
+#define	NFSPROC_DEALLOCATE	67
+
+/* Do an NFSv4.2 LayoutError. */
+#define	NFSPROC_LAYOUTERROR	68
+
 /*
  * Must be defined as one higher than the last NFSv4.2 Proc# above.
  */
-#define	NFSV42_NPROCS		65
+#define	NFSV42_NPROCS		69
 
 #endif	/* NFS_V3NPROCS */
 
@@ -444,11 +456,11 @@ struct nfsstatsv1 {
 	uint64_t	readlink_bios;
 	uint64_t	biocache_readdirs;
 	uint64_t	readdir_bios;
-	uint64_t	rpccnt[NFSV42_NPROCS + 15];
+	uint64_t	rpccnt[NFSV42_NPROCS + 11];
 	uint64_t	rpcretries;
 	uint64_t	srvrpccnt[NFSV42_NOPS + NFSV4OP_FAKENOPS + 15];
-	uint64_t	reserved_0;
-	uint64_t	reserved_1;
+	uint64_t	srvlayouts;
+	uint64_t	cllayouts;
 	uint64_t	rpcrequests;
 	uint64_t	rpctimeouts;
 	uint64_t	rpcunexpected;
@@ -509,7 +521,7 @@ struct nfsstatsov1 {
 	uint64_t	readlink_bios;
 	uint64_t	biocache_readdirs;
 	uint64_t	readdir_bios;
-	uint64_t	rpccnt[NFSV42_NPROCS + 4];
+	uint64_t	rpccnt[NFSV42_NPROCS];
 	uint64_t	rpcretries;
 	uint64_t	srvrpccnt[NFSV42_PURENOPS + NFSV4OP_FAKENOPS];
 	uint64_t	reserved_0;
@@ -880,9 +892,11 @@ int nfsmsleep(void *, void *, int, const char *, struct timespec *);
 /*
  * Some queue.h files don't have these dfined in them.
  */
+#ifndef LIST_END
 #define	LIST_END(head)		NULL
 #define	SLIST_END(head)		NULL
 #define	TAILQ_END(head)		NULL
+#endif
 
 /*
  * This must be defined to be a global variable that increments once
@@ -996,6 +1010,7 @@ int nfscl_loadattrcache(struct vnode **, struct nfsvattr *, void *, void *,
     int, int);
 int newnfs_realign(struct mbuf **, int);
 bool ncl_pager_setsize(struct vnode *vp, u_quad_t *nsizep);
+void ncl_copy_vattr(struct vattr *dst, struct vattr *src);
 
 /*
  * If the port runs on an SMP box that can enforce Atomic ops with low
@@ -1004,6 +1019,7 @@ bool ncl_pager_setsize(struct vnode *vp, u_quad_t *nsizep);
  * "out by one" without disastrous consequences.
  */
 #define	NFSINCRGLOBAL(a)	((a)++)
+#define	NFSDECRGLOBAL(a)	((a)--)
 
 /*
  * Assorted funky stuff to make things work under Darwin8.

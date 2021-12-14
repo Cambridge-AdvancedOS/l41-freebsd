@@ -170,6 +170,7 @@ struct fileops {
  * none	not locked
  */
 
+#if __BSD_VISIBLE
 struct fadvise_info {
 	int		fa_advice;	/* (f) FADV_* type. */
 	off_t		fa_start;	/* (f) Region start. */
@@ -209,12 +210,14 @@ struct file {
 
 #define	FOFFSET_LOCKED       0x1
 #define	FOFFSET_LOCK_WAITING 0x2
+#endif /* __BSD_VISIBLE */
 
 #endif /* _KERNEL || _WANT_FILE */
 
 /*
  * Userland version of struct file, for sysctl
  */
+#if __BSD_VISIBLE
 struct xfile {
 	ksize_t	xf_size;	/* size of struct xfile */
 	pid_t	xf_pid;		/* owning process */
@@ -234,11 +237,13 @@ struct xfile {
 	int	_xf_int_pad3;
 	int64_t	_xf_int64_pad[6];
 };
+#endif /* __BSD_VISIBLE */
 
 #ifdef _KERNEL
 
 extern struct fileops vnops;
 extern struct fileops badfileops;
+extern struct fileops path_fileops;
 extern struct fileops socketops;
 extern int maxfiles;		/* kernel limit on number of open files */
 extern int maxfilesperproc;	/* per process limit on number of open files */
@@ -262,10 +267,11 @@ fo_kqfilter_t	invfo_kqfilter;
 fo_chmod_t	invfo_chmod;
 fo_chown_t	invfo_chown;
 fo_sendfile_t	invfo_sendfile;
-
+fo_stat_t	vn_statfile;
 fo_sendfile_t	vn_sendfile;
 fo_seek_t	vn_seek;
 fo_fill_kinfo_t	vn_fill_kinfo;
+fo_kqfilter_t	vn_kqfilter_opath;
 int vn_fill_kinfo_vnode(struct vnode *vp, struct kinfo_file *kif);
 
 void finit(struct file *, u_int, short, void *, struct fileops *);

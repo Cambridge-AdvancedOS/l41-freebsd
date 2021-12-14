@@ -15,8 +15,9 @@ PKGCONFBRANCH?=	latest
 .  endif
 . endif
 .endif
-CONFS=		FreeBSD.conf.${PKGCONFBRANCH}
-CONFSNAME=	FreeBSD.conf
+PKGCONF?=	FreeBSD.conf.${PKGCONFBRANCH}
+CONFS=		${PKGCONF}
+CONFSNAME_${PKGCONF}=	${PKGCONF:C/\.conf.+$/.conf/}
 CONFSDIR=	/etc/pkg
 CONFSMODE=	644
 PROG=	pkg
@@ -25,6 +26,6 @@ MAN=	pkg.7
 
 CFLAGS+=-I${SRCTOP}/contrib/libucl/include
 .PATH:	${SRCTOP}/contrib/libucl/include
-LIBADD=	archive fetch ucl sbuf crypto ssl util
+LIBADD=	archive fetch ucl crypto ssl util
 
 .include <bsd.prog.mk>

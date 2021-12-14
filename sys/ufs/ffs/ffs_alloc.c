@@ -517,6 +517,7 @@ ffs_reallocblks(ap)
 	} */ *ap;
 {
 	struct ufsmount *ump;
+	int error;
 
 	/*
 	 * We used to skip reallocating the blocks of a file into a
@@ -543,12 +544,14 @@ ffs_reallocblks(ap)
 	 * here.  Instead we simply fail to reallocate blocks if this
 	 * rare condition arises.
 	 */
-	if (DOINGSOFTDEP(ap->a_vp))
+	if (DOINGSUJ(ap->a_vp))
 		if (softdep_prealloc(ap->a_vp, MNT_NOWAIT) != 0)
 			return (ENOSPC);
-	if (ump->um_fstype == UFS1)
-		return (ffs_reallocblks_ufs1(ap));
-	return (ffs_reallocblks_ufs2(ap));
+	vn_seqc_write_begin(ap->a_vp);
+	error = ump->um_fstype == UFS1 ? ffs_reallocblks_ufs1(ap) :
+	    ffs_reallocblks_ufs2(ap);
+	vn_seqc_write_end(ap->a_vp);
+	return (error);
 }
 
 static int
@@ -2248,9 +2251,12 @@ ffs_blkfree_cg(ump, fs, devvp, bno, size, inum, dephd)
 		MPASS(devvp->v_mount->mnt_data == ump);
 		dev = ump->um_devvp->v_rdev;
 	} else if (devvp->v_type == VCHR) {
-		/* devvp is a normal disk device */
+		/*
+		 * devvp is a normal disk device
+		 * XXXKIB: devvp is not locked there, v_rdev access depends on
+		 * busy mount, which prevents mntfs devvp from reclamation.
+		 */
 		dev = devvp->v_rdev;
-		ASSERT_VOP_LOCKED(devvp, "ffs_blkfree_cg");
 	} else
 		return;
 #ifdef INVARIANTS
@@ -3211,9 +3217,9 @@ sysctl_ffs_fsck(SYSCTL_HANDLER_ARGS)
 	cap_rights_t rights;
 	int filetype, error;
 
-	if (req->newlen > sizeof cmd)
+	if (req->newptr == NULL || req->newlen > sizeof(cmd))
 		return (EBADRPC);
-	if ((error = SYSCTL_IN(req, &cmd, sizeof cmd)) != 0)
+	if ((error = SYSCTL_IN(req, &cmd, sizeof(cmd))) != 0)
 		return (error);
 	if (cmd.version != FFS_CMD_VERSION)
 		return (ERPCMISMATCH);
@@ -3233,8 +3239,7 @@ sysctl_ffs_fsck(SYSCTL_HANDLER_ARGS)
 		return (EINVAL);
 	}
 	ump = VFSTOUFS(mp);
-	if ((mp->mnt_flag & MNT_RDONLY) &&
-	    ump->um_fsckpid != td->td_proc->p_pid) {
+	if (mp->mnt_flag & MNT_RDONLY) {
 		vn_finished_write(mp);
 		fdrop(fp, td);
 		return (EROFS);

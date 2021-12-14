@@ -277,9 +277,9 @@ tmpfs_mknod(struct vop_mknod_args *v)
 
 	if (vap->va_type != VBLK && vap->va_type != VCHR &&
 	    vap->va_type != VFIFO)
-		return EINVAL;
+		return (EINVAL);
 
-	return tmpfs_alloc_file(dvp, vpp, vap, cnp, NULL);
+	return (tmpfs_alloc_file(dvp, vpp, vap, cnp, NULL));
 }
 
 struct fileops tmpfs_fnops;
@@ -517,7 +517,7 @@ tmpfs_getattr(struct vop_getattr_args *v)
 		vap->va_bytes = node->tn_size;
 	vap->va_filerev = 0;
 
-	return 0;
+	return (0);
 }
 
 int
@@ -575,7 +575,7 @@ tmpfs_setattr(struct vop_setattr_args *v)
 
 	MPASS(VOP_ISLOCKED(vp));
 
-	return error;
+	return (error);
 }
 
 static int
@@ -623,8 +623,9 @@ tmpfs_read_pgcache(struct vop_read_pgcache_args *v)
 	if (object == NULL)
 		goto out_smr;
 
-	MPASS((object->flags & (OBJ_ANON | OBJ_DEAD | OBJ_TMPFS_NODE)) ==
-	    OBJ_TMPFS_NODE);
+	MPASS(object->type == tmpfs_pager_type);
+	MPASS((object->flags & (OBJ_ANON | OBJ_DEAD | OBJ_SWAP)) ==
+	    OBJ_SWAP);
 	if (!VN_IS_DOOMED(vp)) {
 		/* size cannot become shorter due to rangelock. */
 		size = node->tn_size;
@@ -704,7 +705,7 @@ tmpfs_fsync(struct vop_fsync_args *v)
 	tmpfs_check_mtime(vp);
 	tmpfs_update(vp);
 
-	return 0;
+	return (0);
 }
 
 static int
@@ -807,7 +808,7 @@ tmpfs_link(struct vop_link_args *v)
 	error = 0;
 
 out:
-	return error;
+	return (error);
 }
 
 /*
@@ -1263,7 +1264,7 @@ tmpfs_mkdir(struct vop_mkdir_args *v)
 
 	MPASS(vap->va_type == VDIR);
 
-	return tmpfs_alloc_file(dvp, vpp, vap, cnp, NULL);
+	return (tmpfs_alloc_file(dvp, vpp, vap, cnp, NULL));
 }
 
 static int
@@ -1354,7 +1355,7 @@ tmpfs_rmdir(struct vop_rmdir_args *v)
 	error = 0;
 
 out:
-	return error;
+	return (error);
 }
 
 static int
@@ -1372,7 +1373,7 @@ tmpfs_symlink(struct vop_symlink_args *v)
 	vap->va_type = VLNK;
 #endif
 
-	return tmpfs_alloc_file(dvp, vpp, vap, cnp, target);
+	return (tmpfs_alloc_file(dvp, vpp, vap, cnp, target));
 }
 
 static int
@@ -1395,7 +1396,7 @@ tmpfs_readdir(struct vop_readdir_args *va)
 
 	/* This operation only makes sense on directory nodes. */
 	if (vp->v_type != VDIR)
-		return ENOTDIR;
+		return (ENOTDIR);
 
 	maxcookies = 0;
 	node = VP_TO_TMPFS_DIR(vp);
@@ -1432,7 +1433,7 @@ tmpfs_readdir(struct vop_readdir_args *va)
 		*eofflag =
 		    (error == 0 && uio->uio_offset == TMPFS_DIRCOOKIE_EOF);
 
-	return error;
+	return (error);
 }
 
 static int
@@ -1524,26 +1525,18 @@ tmpfs_reclaim(struct vop_reclaim_args *v)
 	struct vnode *vp;
 	struct tmpfs_mount *tmp;
 	struct tmpfs_node *node;
-	bool unlock, tm_locked;
+	bool unlock;
 
 	vp = v->a_vp;
 	node = VP_TO_TMPFS_NODE(vp);
 	tmp = VFS_TO_TMPFS(vp->v_mount);
-	tm_locked = false;
 
 	if (vp->v_type == VREG)
 		tmpfs_destroy_vobject(vp, node->tn_reg.tn_aobj);
 	vp->v_object = NULL;
 
-relock:
+	TMPFS_LOCK(tmp);
 	TMPFS_NODE_LOCK(node);
-	if (!tm_locked && node->tn_links == 0 &&
-	    (node->tn_vpstate & TMPFS_VNODE_ALLOCATING) == 0) {
-		TMPFS_NODE_UNLOCK(node);
-		TMPFS_LOCK(tmp);
-		tm_locked = true;
-		goto relock;
-	}
 	tmpfs_free_vp(vp);
 
 	/*
@@ -1551,19 +1544,16 @@ relock:
 	 * we must free its associated data structures (now that the vnode
 	 * is being reclaimed).
 	 */
+	unlock = true;
 	if (node->tn_links == 0 &&
 	    (node->tn_vpstate & TMPFS_VNODE_ALLOCATING) == 0) {
-		MPASS(tm_locked);
 		node->tn_vpstate = TMPFS_VNODE_DOOMED;
 		unlock = !tmpfs_free_node_locked(tmp, node, true);
-	} else {
-		unlock = true;
 	}
 
 	if (unlock) {
 		TMPFS_NODE_UNLOCK(node);
-		if (tm_locked)
-			TMPFS_UNLOCK(tmp);
+		TMPFS_UNLOCK(tmp);
 	}
 
 	MPASS(vp->v_data == NULL);
@@ -1590,7 +1580,7 @@ tmpfs_print(struct vop_print_args *v)
 
 	printf("\n");
 
-	return 0;
+	return (0);
 }
 
 int
@@ -1607,6 +1597,10 @@ tmpfs_pathconf(struct vop_pathconf_args *v)
 	switch (name) {
 	case _PC_LINK_MAX:
 		*retval = TMPFS_LINK_MAX;
+		break;
+
+	case _PC_SYMLINK_MAX:
+		*retval = MAXPATHLEN;
 		break;
 
 	case _PC_NAME_MAX:
@@ -1640,7 +1634,7 @@ tmpfs_pathconf(struct vop_pathconf_args *v)
 		error = vop_stdpathconf(v);
 	}
 
-	return error;
+	return (error);
 }
 
 static int

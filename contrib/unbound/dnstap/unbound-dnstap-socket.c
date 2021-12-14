@@ -727,7 +727,7 @@ static ssize_t tap_receive(struct tap_data* data, void* buf, size_t len)
 }
 
 /** delete the tap structure */
-void tap_data_free(struct tap_data* data)
+static void tap_data_free(struct tap_data* data)
 {
 	ub_event_del(data->ev);
 	ub_event_free(data->ev);
@@ -1012,6 +1012,7 @@ void dtio_tap_callback(int fd, short ATTR_UNUSED(bits), void* arg)
 		if(verbosity) log_info("bidirectional stream");
 		if(!reply_with_accept(data)) {
 			tap_data_free(data);
+			return;
 		}
 	} else if(data->len >= 4 && sldns_read_uint32(data->frame) ==
 		FSTRM_CONTROL_FRAME_STOP && data->is_bidirectional) {
@@ -1166,7 +1167,13 @@ int sig_quit = 0;
 /** signal handler for user quit */
 static RETSIGTYPE main_sigh(int sig)
 {
-	verbose(VERB_ALGO, "exit on signal %d\n", sig);
+	if(!sig_quit) {
+		char str[] = "exit on signal   \n";
+		str[15] = '0' + (sig/10)%10;
+		str[16] = '0' + sig%10;
+		/* simple cast to void will not silence Wunused-result */
+		(void)!write(STDERR_FILENO, str, strlen(str));
+	}
 	if(sig_base) {
 		ub_event_base_loopexit(sig_base);
 		sig_base = NULL;
@@ -1257,9 +1264,9 @@ int main(int argc, char** argv)
 	memset(&tls_list, 0, sizeof(tls_list));
 
 	/* lock debug start (if any) */
+	checklock_start();
 	log_ident_set("unbound-dnstap-socket");
 	log_init(0, 0, 0);
-	checklock_start();
 
 #ifdef SIGPIPE
 	if(signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
@@ -1354,6 +1361,10 @@ int main(int argc, char** argv)
 struct tube;
 struct query_info;
 #include "util/data/packed_rrset.h"
+#include "daemon/worker.h"
+#include "daemon/remote.h"
+#include "util/fptr_wlist.h"
+#include "libunbound/context.h"
 
 void worker_handle_control_cmd(struct tube* ATTR_UNUSED(tube),
 	uint8_t* ATTR_UNUSED(buffer), size_t ATTR_UNUSED(len),
@@ -1365,14 +1376,6 @@ void worker_handle_control_cmd(struct tube* ATTR_UNUSED(tube),
 int worker_handle_request(struct comm_point* ATTR_UNUSED(c), 
 	void* ATTR_UNUSED(arg), int ATTR_UNUSED(error),
         struct comm_reply* ATTR_UNUSED(repinfo))
-{
-	log_assert(0);
-	return 0;
-}
-
-int worker_handle_reply(struct comm_point* ATTR_UNUSED(c), 
-	void* ATTR_UNUSED(arg), int ATTR_UNUSED(error),
-        struct comm_reply* ATTR_UNUSED(reply_info))
 {
 	log_assert(0);
 	return 0;
@@ -1412,8 +1415,9 @@ struct outbound_entry* worker_send_query(
 	int ATTR_UNUSED(dnssec), int ATTR_UNUSED(want_dnssec),
 	int ATTR_UNUSED(nocaps), struct sockaddr_storage* ATTR_UNUSED(addr),
 	socklen_t ATTR_UNUSED(addrlen), uint8_t* ATTR_UNUSED(zone),
-	size_t ATTR_UNUSED(zonelen), int ATTR_UNUSED(ssl_upstream),
-	char* ATTR_UNUSED(tls_auth_name), struct module_qstate* ATTR_UNUSED(q))
+	size_t ATTR_UNUSED(zonelen), int ATTR_UNUSED(tcp_upstream),
+	int ATTR_UNUSED(ssl_upstream), char* ATTR_UNUSED(tls_auth_name),
+	struct module_qstate* ATTR_UNUSED(q))
 {
 	log_assert(0);
 	return 0;
@@ -1444,16 +1448,9 @@ struct outbound_entry* libworker_send_query(
 	int ATTR_UNUSED(dnssec), int ATTR_UNUSED(want_dnssec),
 	int ATTR_UNUSED(nocaps), struct sockaddr_storage* ATTR_UNUSED(addr),
 	socklen_t ATTR_UNUSED(addrlen), uint8_t* ATTR_UNUSED(zone),
-	size_t ATTR_UNUSED(zonelen), int ATTR_UNUSED(ssl_upstream),
-	char* ATTR_UNUSED(tls_auth_name), struct module_qstate* ATTR_UNUSED(q))
-{
-	log_assert(0);
-	return 0;
-}
-
-int libworker_handle_reply(struct comm_point* ATTR_UNUSED(c), 
-	void* ATTR_UNUSED(arg), int ATTR_UNUSED(error),
-        struct comm_reply* ATTR_UNUSED(reply_info))
+	size_t ATTR_UNUSED(zonelen), int ATTR_UNUSED(tcp_upstream),
+	int ATTR_UNUSED(ssl_upstream), char* ATTR_UNUSED(tls_auth_name),
+	struct module_qstate* ATTR_UNUSED(q))
 {
 	log_assert(0);
 	return 0;

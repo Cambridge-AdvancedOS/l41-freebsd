@@ -836,7 +836,7 @@ ng_ID2noderef(ng_ID_t ID)
 }
 
 ng_ID_t
-ng_node2ID(node_p node)
+ng_node2ID(node_cp node)
 {
 	return (node ? NG_NODE_ID(node) : 0);
 }
@@ -854,6 +854,10 @@ ng_name_node(node_p node, const char *name)
 	uint32_t hash;
 	node_p node2;
 	int i;
+
+	/* Rename without change is a noop */
+	if (strcmp(NG_NODE_NAME(node), name) == 0)
+		return (0);
 
 	/* Check the name is valid */
 	for (i = 0; i < NG_NODESIZ; i++) {
@@ -2277,7 +2281,7 @@ ng_snd_item(item_p item, int flags)
 		queue = 1;
 	} else {
 		queue = 0;
-#ifdef GET_STACK_USAGE
+
 		/*
 		 * Most of netgraph nodes have small stack consumption and
 		 * for them 25% of free stack space is more than enough.
@@ -2292,7 +2296,6 @@ ng_snd_item(item_p item, int flags)
 		    ((node->nd_flags & NGF_HI_STACK) || (hook &&
 		    (hook->hk_flags & HK_HI_STACK)))))
 			queue = 1;
-#endif
 	}
 
 	if (queue) {
@@ -2771,7 +2774,7 @@ ng_generic_msg(node_p here, item_p item, hook_p lasthook)
 
 	case NGM_BINARY2ASCII:
 	    {
-		int bufSize = 20 * 1024;	/* XXX hard coded constant */
+		int bufSize = 1024;
 		const struct ng_parse_type *argstype;
 		const struct ng_cmdlist *c;
 		struct ng_mesg *binary, *ascii;
@@ -2785,7 +2788,7 @@ ng_generic_msg(node_p here, item_p item, hook_p lasthook)
 			error = EINVAL;
 			break;
 		}
-
+retry_b2a:
 		/* Get a response message with lots of room */
 		NG_MKRESPONSE(resp, msg, sizeof(*ascii) + bufSize, M_NOWAIT);
 		if (resp == NULL) {
@@ -2827,9 +2830,13 @@ ng_generic_msg(node_p here, item_p item, hook_p lasthook)
 		if (argstype == NULL) {
 			*ascii->data = '\0';
 		} else {
-			if ((error = ng_unparse(argstype,
-			    (u_char *)binary->data,
-			    ascii->data, bufSize)) != 0) {
+			error = ng_unparse(argstype, (u_char *)binary->data,
+			    ascii->data, bufSize);
+			if (error == ERANGE) {
+				NG_FREE_MSG(resp);
+				bufSize *= 2;
+				goto retry_b2a;
+			} else if (error) {
 				NG_FREE_MSG(resp);
 				break;
 			}
@@ -3446,7 +3453,7 @@ ngthread(void *arg)
 
 /*
  * XXX
- * It's posible that a debugging NG_NODE_REF may need
+ * It's possible that a debugging NG_NODE_REF may need
  * to be outside the mutex zone
  */
 static void

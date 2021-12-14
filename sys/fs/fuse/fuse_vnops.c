@@ -437,10 +437,13 @@ fuse_vnop_advlock(struct vop_advlock_args *ap)
 		op = FUSE_GETLK;
 		break;
 	case F_SETLK:
-		op = FUSE_SETLK;
+		if (flags & F_WAIT)
+			op = FUSE_SETLKW;
+		else
+			op = FUSE_SETLK;
 		break;
-	case F_SETLKW:
-		op = FUSE_SETLKW;
+	case F_UNLCK:
+		op = FUSE_SETLK;
 		break;
 	default:
 		return EINVAL;
@@ -463,14 +466,14 @@ fuse_vnop_advlock(struct vop_advlock_args *ap)
 	fdisp_make_vp(&fdi, op, vp, td, cred);
 	fli = fdi.indata;
 	fli->fh = fufh->fh_id;
-	fli->owner = fl->l_pid;
+	fli->owner = td->td_proc->p_pid;
 	fli->lk.start = fl->l_start;
 	if (fl->l_len != 0)
 		fli->lk.end = fl->l_start + fl->l_len - 1;
 	else
 		fli->lk.end = INT64_MAX;
 	fli->lk.type = fl->l_type;
-	fli->lk.pid = fl->l_pid;
+	fli->lk.pid = td->td_proc->p_pid;
 
 	err = fdisp_wait_answ(&fdi);
 	fdisp_destroy(&fdi);
@@ -513,8 +516,9 @@ fuse_vnop_bmap(struct vop_bmap_args *ap)
 	struct fuse_bmap_in *fbi;
 	struct fuse_bmap_out *fbo;
 	struct fuse_data *data;
+	struct fuse_vnode_data *fvdat = VTOFUD(vp);
 	uint64_t biosize;
-	off_t filesize;
+	off_t fsize;
 	daddr_t lbn = ap->a_bn;
 	daddr_t *pbn = ap->a_bnp;
 	int *runp = ap->a_runp;
@@ -547,10 +551,21 @@ fuse_vnop_bmap(struct vop_bmap_args *ap)
 	 */
 	if (runb != NULL)
 		*runb = MIN(lbn, maxrun);
-	if (runp != NULL) {
-		error = fuse_vnode_size(vp, &filesize, td->td_ucred, td);
+	if (runp != NULL && maxrun == 0)
+		*runp = 0;
+	else if (runp != NULL) {
+		/*
+		 * If the file's size is cached, use that value to calculate
+		 * runp, even if the cache is expired.  runp is only advisory,
+		 * and the risk of getting it wrong is not worth the cost of
+		 * another upcall.
+		 */
+		if (fvdat->cached_attrs.va_size != VNOVAL)
+			fsize = fvdat->cached_attrs.va_size;
+		else
+			error = fuse_vnode_size(vp, &fsize, td->td_ucred, td);
 		if (error == 0)
-			*runp = MIN(MAX(0, filesize / (off_t)biosize - lbn - 1),
+			*runp = MIN(MAX(0, fsize / (off_t)biosize - lbn - 1),
 				    maxrun);
 		else
 			*runp = 0;
@@ -892,7 +907,7 @@ fuse_vnop_create(struct vop_create_args *ap)
 	}
 	ASSERT_VOP_ELOCKED(*vpp, "fuse_vnop_create");
 	fuse_internal_cache_attrs(*vpp, &feo->attr, feo->attr_valid,
-		feo->attr_valid_nsec, NULL);
+		feo->attr_valid_nsec, NULL, true);
 
 	fuse_filehandle_init(*vpp, FUFH_RDWR, NULL, td, cred, foo);
 	fuse_vnode_open(*vpp, foo->open_flags, td);
@@ -1148,7 +1163,7 @@ fuse_vnop_link(struct vop_link_args *ap)
 		 */
 		fuse_vnode_clear_attr_cache(tdvp);
 		fuse_internal_cache_attrs(vp, &feo->attr, feo->attr_valid,
-			feo->attr_valid_nsec, NULL);
+			feo->attr_valid_nsec, NULL, true);
 	}
 out:
 	fdisp_destroy(&fdi);
@@ -1174,8 +1189,6 @@ fuse_lookup_alloc(struct mount *mp, void *arg, int lkflags, struct vnode **vpp)
 
 SDT_PROBE_DEFINE3(fusefs, , vnops, cache_lookup,
 	"int", "struct timespec*", "struct timespec*");
-SDT_PROBE_DEFINE2(fusefs, , vnops, lookup_cache_incoherent,
-	"struct vnode*", "struct fuse_entry_out*");
 /*
     struct vnop_lookup_args {
 	struct vnodeop_desc *a_desc;
@@ -1359,53 +1372,17 @@ fuse_vnop_lookup(struct vop_lookup_args *ap)
 			*vpp = dvp;
 		} else {
 			struct fuse_vnode_data *fvdat;
-			struct vattr *vap;
 
 			err = fuse_vnode_get(vnode_mount(dvp), feo, nid, dvp,
 			    &vp, cnp, vtyp);
 			if (err)
 				goto out;
 			*vpp = vp;
-
-			/*
-			 * In the case where we are looking up a FUSE node
-			 * represented by an existing cached vnode, and the
-			 * true size reported by FUSE_LOOKUP doesn't match
-			 * the vnode's cached size, then any cached writes
-			 * beyond the file's current size are lost.
-			 *
-			 * We can get here:
-			 * * following attribute cache expiration, or
-			 * * due a bug in the daemon, or
-			 */
 			fvdat = VTOFUD(vp);
-			if (vnode_isreg(vp) &&
-			    ((filesize != fvdat->cached_attrs.va_size &&
-			      fvdat->flag & FN_SIZECHANGE) ||
-			     ((vap = VTOVA(vp)) &&
-			      filesize != vap->va_size)))
-			{
-				SDT_PROBE2(fusefs, , vnops, lookup_cache_incoherent, vp, feo);
-				fvdat->flag &= ~FN_SIZECHANGE;
-				/*
-				 * The server changed the file's size even
-				 * though we had it cached, or had dirty writes
-				 * in the WB cache!
-				 */
-				printf("%s: cache incoherent on %s!  "
-		    		    "Buggy FUSE server detected.  To prevent "
-				    "data corruption, disable the data cache "
-				    "by mounting with -o direct_io, or as "
-				    "directed otherwise by your FUSE server's "
-		    		    "documentation\n", __func__,
-				    vnode_mount(vp)->mnt_stat.f_mntonname);
-				int iosize = fuse_iosize(vp);
-				v_inval_buf_range(vp, 0, INT64_MAX, iosize);
-			}
 
 			MPASS(feo != NULL);
 			fuse_internal_cache_attrs(*vpp, &feo->attr,
-				feo->attr_valid, feo->attr_valid_nsec, NULL);
+				feo->attr_valid, feo->attr_valid_nsec, NULL, true);
 			fuse_validity_2_bintime(feo->entry_valid,
 				feo->entry_valid_nsec,
 				&fvdat->entry_cache_timeout);
@@ -2199,25 +2176,24 @@ fuse_gbp_getblkno(struct vnode *vp, vm_ooffset_t off)
 }
 
 static int
-fuse_gbp_getblksz(struct vnode *vp, daddr_t lbn)
+fuse_gbp_getblksz(struct vnode *vp, daddr_t lbn, long *blksz)
 {
 	off_t filesize;
-	int blksz, err;
+	int err;
 	const int biosize = fuse_iosize(vp);
 
 	err = fuse_vnode_size(vp, &filesize, NULL, NULL);
-	KASSERT(err == 0, ("vfs_bio_getpages can't handle errors here"));
-	if (err)
-		return biosize;
-
-	if ((off_t)lbn * biosize >= filesize) {
-		blksz = 0;
+	if (err) {
+		/* This will turn into a SIGBUS */
+		return (EIO);
+	} else if ((off_t)lbn * biosize >= filesize) {
+		*blksz = 0;
 	} else if ((off_t)(lbn + 1) * biosize > filesize) {
-		blksz = filesize - (off_t)lbn *biosize;
+		*blksz = filesize - (off_t)lbn *biosize;
 	} else {
-		blksz = biosize;
+		*blksz = biosize;
 	}
-	return (blksz);
+	return (0);
 }
 
 /*
@@ -2592,9 +2568,12 @@ fuse_vnop_listextattr(struct vop_listextattr_args *ap)
 	linux_list = fdi.answ;
 	/* FUSE doesn't allow the server to return more data than requested */
 	if (fdi.iosize > linux_list_len) {
-		printf("WARNING: FUSE protocol violation.  Server returned "
+		struct fuse_data *data = fuse_get_mpdata(mp);
+
+		fuse_warn(data, FSESS_WARN_LSEXTATTR_LONG,
+			"server returned "
 			"more extended attribute data than requested; "
-			"should've returned ERANGE instead");
+			"should've returned ERANGE instead.");
 	} else {
 		/* But returning less data is fine */
 		linux_list_len = fdi.iosize;

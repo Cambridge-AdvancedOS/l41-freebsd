@@ -129,6 +129,7 @@ libkern/memcmp.c		standard
 libkern/memset.c		standard
 libkern/moddi3.c		optional	powerpc | powerpcspe
 libkern/qdivrem.c		optional	powerpc | powerpcspe
+libkern/strlen.c		standard
 libkern/ucmpdi2.c		optional	powerpc | powerpcspe
 libkern/udivdi3.c		optional	powerpc | powerpcspe
 libkern/umoddi3.c		optional	powerpc | powerpcspe
@@ -254,7 +255,6 @@ powerpc/powerpc/elf64_machdep.c	optional	powerpc64 | powerpc64le
 powerpc/powerpc/exec_machdep.c	standard
 powerpc/powerpc/fpu.c		standard
 powerpc/powerpc/gdb_machdep.c	optional	gdb
-powerpc/powerpc/in_cksum.c	optional	inet | inet6
 powerpc/powerpc/interrupt.c	standard
 powerpc/powerpc/intr_machdep.c	standard
 powerpc/powerpc/iommu_if.m	standard

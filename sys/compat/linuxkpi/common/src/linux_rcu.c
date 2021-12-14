@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2016 Matthew Macy (mmacy@mattmacy.io)
- * Copyright (c) 2017-2020 Hans Petter Selasky (hselasky@freebsd.org)
+ * Copyright (c) 2017-2021 Hans Petter Selasky (hselasky@freebsd.org)
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,6 +48,8 @@ __FBSDID("$FreeBSD$");
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/compat.h>
+#include <linux/llist.h>
+#include <linux/irq_work.h>
 
 /*
  * By defining CONFIG_NO_RCU_SKIP LinuxKPI RCU locks and asserts will
@@ -60,13 +62,15 @@ __FBSDID("$FreeBSD$");
 #endif
 
 struct callback_head {
-	STAILQ_ENTRY(callback_head) entry;
+	union {
+		STAILQ_ENTRY(callback_head) entry;
+		struct llist_node node;
+	};
 	rcu_callback_t func;
 };
 
 struct linux_epoch_head {
-	STAILQ_HEAD(, callback_head) cb_head;
-	struct mtx lock;
+	struct llist_head cb_head;
 	struct task task;
 } __aligned(CACHE_LINE_SIZE);
 
@@ -84,6 +88,15 @@ struct linux_epoch_record {
  * LinuxKPI.
  */
 CTASSERT(sizeof(struct rcu_head) == sizeof(struct callback_head));
+
+/*
+ * Verify that "rcu_section[0]" has the same size as
+ * "ck_epoch_section_t". This has been done to avoid having to add
+ * special compile flags for including ck_epoch.h to all clients of
+ * the LinuxKPI.
+ */
+CTASSERT(sizeof(((struct task_struct *)0)->rcu_section[0] ==
+    sizeof(ck_epoch_section_t)));
 
 /*
  * Verify that "epoch_record" is at beginning of "struct
@@ -111,9 +124,8 @@ linux_rcu_runtime_init(void *arg __unused)
 
 		head = &linux_epoch_head[j];
 
-		mtx_init(&head->lock, "LRCU-HEAD", NULL, MTX_DEF);
 		TASK_INIT(&head->task, 0, linux_rcu_cleaner_func, head);
-		STAILQ_INIT(&head->cb_head);
+		init_llist_head(&head->cb_head);
 
 		CPU_FOREACH(i) {
 			struct linux_epoch_record *record;
@@ -131,36 +143,21 @@ linux_rcu_runtime_init(void *arg __unused)
 SYSINIT(linux_rcu_runtime, SI_SUB_CPU, SI_ORDER_ANY, linux_rcu_runtime_init, NULL);
 
 static void
-linux_rcu_runtime_uninit(void *arg __unused)
-{
-	struct linux_epoch_head *head;
-	int j;
-
-	for (j = 0; j != RCU_TYPE_MAX; j++) {
-		head = &linux_epoch_head[j];
-
-		mtx_destroy(&head->lock);
-	}
-}
-SYSUNINIT(linux_rcu_runtime, SI_SUB_LOCK, SI_ORDER_SECOND, linux_rcu_runtime_uninit, NULL);
-
-static void
 linux_rcu_cleaner_func(void *context, int pending __unused)
 {
-	struct linux_epoch_head *head;
+	struct linux_epoch_head *head = context;
 	struct callback_head *rcu;
 	STAILQ_HEAD(, callback_head) tmp_head;
+	struct llist_node *node, *next;
 	uintptr_t offset;
 
-	linux_set_current(curthread);
-
-	head = context;
-
 	/* move current callbacks into own queue */
-	mtx_lock(&head->lock);
 	STAILQ_INIT(&tmp_head);
-	STAILQ_CONCAT(&tmp_head, &head->cb_head);
-	mtx_unlock(&head->lock);
+	llist_for_each_safe(node, next, llist_del_all(&head->cb_head)) {
+		rcu = container_of(node, struct callback_head, node);
+		/* re-reverse list to restore chronological order */
+		STAILQ_INSERT_HEAD(&tmp_head, rcu, entry);
+	}
 
 	/* synchronize */
 	linux_synchronize_rcu(head - linux_epoch_head);
@@ -189,6 +186,14 @@ linux_rcu_read_lock(unsigned type)
 	if (RCU_SKIP())
 		return;
 
+	ts = current;
+
+	/* assert valid refcount */
+	MPASS(ts->rcu_recurse[type] != INT_MAX);
+
+	if (++(ts->rcu_recurse[type]) != 1)
+		return;
+
 	/*
 	 * Pin thread to current CPU so that the unlock code gets the
 	 * same per-CPU epoch record:
@@ -196,17 +201,15 @@ linux_rcu_read_lock(unsigned type)
 	sched_pin();
 
 	record = &DPCPU_GET(linux_epoch_record[type]);
-	ts = current;
 
 	/*
 	 * Use a critical section to prevent recursion inside
 	 * ck_epoch_begin(). Else this function supports recursion.
 	 */
 	critical_enter();
-	ck_epoch_begin(&record->epoch_record, NULL);
-	ts->rcu_recurse[type]++;
-	if (ts->rcu_recurse[type] == 1)
-		TAILQ_INSERT_TAIL(&record->ts_head, ts, rcu_entry[type]);
+	ck_epoch_begin(&record->epoch_record,
+	    (ck_epoch_section_t *)&ts->rcu_section[type]);
+	TAILQ_INSERT_TAIL(&record->ts_head, ts, rcu_entry[type]);
 	critical_exit();
 }
 
@@ -221,18 +224,24 @@ linux_rcu_read_unlock(unsigned type)
 	if (RCU_SKIP())
 		return;
 
-	record = &DPCPU_GET(linux_epoch_record[type]);
 	ts = current;
+
+	/* assert valid refcount */
+	MPASS(ts->rcu_recurse[type] > 0);
+	
+	if (--(ts->rcu_recurse[type]) != 0)
+		return;
+
+	record = &DPCPU_GET(linux_epoch_record[type]);
 
 	/*
 	 * Use a critical section to prevent recursion inside
 	 * ck_epoch_end(). Else this function supports recursion.
 	 */
 	critical_enter();
-	ck_epoch_end(&record->epoch_record, NULL);
-	ts->rcu_recurse[type]--;
-	if (ts->rcu_recurse[type] == 0)
-		TAILQ_REMOVE(&record->ts_head, ts, rcu_entry[type]);
+	ck_epoch_end(&record->epoch_record,
+	    (ck_epoch_section_t *)&ts->rcu_section[type]);
+	TAILQ_REMOVE(&record->ts_head, ts, rcu_entry[type]);
 	critical_exit();
 
 	sched_unpin();
@@ -358,12 +367,16 @@ linux_rcu_barrier(unsigned type)
 
 	MPASS(type < RCU_TYPE_MAX);
 
-	linux_synchronize_rcu(type);
-
+	/*
+	 * This function is not obligated to wait for a grace period.
+	 * It only waits for RCU callbacks that have already been posted.
+	 * If there are no RCU callbacks posted, rcu_barrier() can return
+	 * immediately.
+	 */
 	head = &linux_epoch_head[type];
 
 	/* wait for callbacks to complete */
-	taskqueue_drain(taskqueue_fast, &head->task);
+	taskqueue_drain(linux_irq_work_tq, &head->task);
 }
 
 void
@@ -377,11 +390,9 @@ linux_call_rcu(unsigned type, struct rcu_head *context, rcu_callback_t func)
 	rcu = (struct callback_head *)context;
 	head = &linux_epoch_head[type];
 
-	mtx_lock(&head->lock);
 	rcu->func = func;
-	STAILQ_INSERT_TAIL(&head->cb_head, rcu, entry);
-	taskqueue_enqueue(taskqueue_fast, &head->task);
-	mtx_unlock(&head->lock);
+	llist_add(&rcu->node, &head->cb_head);
+	taskqueue_enqueue(linux_irq_work_tq, &head->task);
 }
 
 int

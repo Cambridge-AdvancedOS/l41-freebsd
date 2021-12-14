@@ -359,7 +359,8 @@ ifnet_byindex_ref(u_short idx)
 	ifp = ifnet_byindex(idx);
 	if (ifp == NULL || (ifp->if_flags & IFF_DYING))
 		return (NULL);
-	if_ref(ifp);
+	if (!if_try_ref(ifp))
+		return (NULL);
 	return (ifp);
 }
 
@@ -738,9 +739,18 @@ if_free(struct ifnet *ifp)
 void
 if_ref(struct ifnet *ifp)
 {
+	u_int old;
 
 	/* We don't assert the ifnet list lock here, but arguably should. */
-	refcount_acquire(&ifp->if_refcount);
+	old = refcount_acquire(&ifp->if_refcount);
+	KASSERT(old > 0, ("%s: ifp %p has 0 refs", __func__, ifp));
+}
+
+bool
+if_try_ref(struct ifnet *ifp)
+{
+	NET_EPOCH_ASSERT();
+	return (refcount_acquire_if_not_zero(&ifp->if_refcount));
 }
 
 void
@@ -1857,8 +1867,18 @@ fail:
 void
 ifa_ref(struct ifaddr *ifa)
 {
+	u_int old;
 
-	refcount_acquire(&ifa->ifa_refcnt);
+	old = refcount_acquire(&ifa->ifa_refcnt);
+	KASSERT(old > 0, ("%s: ifa %p has 0 refs", __func__, ifa));
+}
+
+int
+ifa_try_ref(struct ifaddr *ifa)
+{
+
+	NET_EPOCH_ASSERT();
+	return (refcount_acquire_if_not_zero(&ifa->ifa_refcnt));
 }
 
 static void
@@ -2195,14 +2215,17 @@ static void
 if_unroute(struct ifnet *ifp, int flag, int fam)
 {
 	struct ifaddr *ifa;
+	struct epoch_tracker et;
 
 	KASSERT(flag == IFF_UP, ("if_unroute: flag != IFF_UP"));
 
 	ifp->if_flags &= ~flag;
 	getmicrotime(&ifp->if_lastchange);
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link)
 		if (fam == PF_UNSPEC || (fam == ifa->ifa_addr->sa_family))
 			pfctlinput(PRC_IFDOWN, ifa->ifa_addr);
+	NET_EPOCH_EXIT(et);
 	ifp->if_qflush(ifp);
 
 	if (ifp->if_carp)
@@ -2218,14 +2241,17 @@ static void
 if_route(struct ifnet *ifp, int flag, int fam)
 {
 	struct ifaddr *ifa;
+	struct epoch_tracker et;
 
 	KASSERT(flag == IFF_UP, ("if_route: flag != IFF_UP"));
 
 	ifp->if_flags |= flag;
 	getmicrotime(&ifp->if_lastchange);
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link)
 		if (fam == PF_UNSPEC || (fam == ifa->ifa_addr->sa_family))
 			pfctlinput(PRC_IFUP, ifa->ifa_addr);
+	NET_EPOCH_EXIT(et);
 	if (ifp->if_carp)
 		(*carp_linkstate_p)(ifp);
 	rt_ifmsg(ifp);
@@ -2653,11 +2679,6 @@ ifhwioctl(u_long cmd, struct ifnet *ifp, caddr_t data, struct thread *td)
 			return (error);
 		if (new_name[0] == '\0')
 			return (EINVAL);
-		if (new_name[IFNAMSIZ-1] != '\0') {
-			new_name[IFNAMSIZ-1] = '\0';
-			if (strlen(new_name) == IFNAMSIZ-1)
-				return (EINVAL);
-		}
 		if (strcmp(new_name, ifp->if_xname) == 0)
 			break;
 		if (ifunit(new_name) != NULL)
@@ -4035,6 +4056,14 @@ if_deregister_com_alloc(u_char type)
 	    ("if_deregister_com_alloc: %d not registered", type));
 	KASSERT(if_com_free[type] != NULL,
 	    ("if_deregister_com_alloc: %d free not registered", type));
+
+	/*
+	 * Ensure all pending EPOCH(9) callbacks have been executed. This
+	 * fixes issues about late invocation of if_destroy(), which leads
+	 * to memory leak from if_com_alloc[type] allocated if_l2com.
+	 */
+	epoch_drain_callbacks(net_epoch_preempt);
+
 	if_com_alloc[type] = NULL;
 	if_com_free[type] = NULL;
 }

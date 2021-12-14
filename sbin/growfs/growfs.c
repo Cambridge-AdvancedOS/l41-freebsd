@@ -1461,10 +1461,9 @@ main(int argc, char **argv)
 		}
 	}
 	/*
-	 * Check for unclean filesystem.
+	 * Check for filesystem that was unclean at mount time.
 	 */
-	if (fs->fs_clean == 0 ||
-	    (fs->fs_flags & (FS_UNCLEAN | FS_NEEDSFSCK)) != 0)
+	if ((fs->fs_flags & (FS_UNCLEAN | FS_NEEDSFSCK)) != 0)
 		errx(1, "%s is not clean - run fsck.\n", *argv);
 	memcpy(&osblock, fs, fs->fs_sbsize);
 	free(fs);
@@ -1504,7 +1503,10 @@ main(int argc, char **argv)
 		humanize_number(newsizebuf, sizeof(newsizebuf), size,
 		    "B", HN_AUTOSCALE, HN_B | HN_NOSPACE | HN_DECIMAL);
 
-		errx(1, "requested size %s is not larger than the current "
+		if (size == (uint64_t)(osblock.fs_size * osblock.fs_fsize))
+			errx(0, "requested size %s is equal to the current "
+			    "filesystem size %s", newsizebuf, oldsizebuf);
+		errx(1, "requested size %s is smaller than the current "
 		   "filesystem size %s", newsizebuf, oldsizebuf);
 	}
 

@@ -156,6 +156,13 @@
 #define	VM_MIN_KERNEL_ADDRESS	(0xffff000000000000UL)
 #define	VM_MAX_KERNEL_ADDRESS	(0xffff008000000000UL)
 
+/* If true addr is in the kernel address space */
+#define	ADDR_IS_KERNEL(addr)	(((addr) & (1ul << 55)) == (1ul << 55))
+/* If true addr is in its canonical form (i.e. no TBI, PAC, etc.) */
+#define	ADDR_IS_CANONICAL(addr)	\
+    (((addr) & 0xffff000000000000UL) == 0 || \
+     ((addr) & 0xffff000000000000UL) == 0xffff000000000000UL)
+
 /* 95 TiB maximum for the direct map region */
 #define	DMAP_MIN_ADDRESS	(0xffffa00000000000UL)
 #define	DMAP_MAX_ADDRESS	(0xffffff0000000000UL)
@@ -228,7 +235,6 @@ extern vm_paddr_t dmap_phys_base;
 extern vm_paddr_t dmap_phys_max;
 extern vm_offset_t dmap_max_addr;
 extern vm_offset_t vm_max_kernel_address;
-extern vm_offset_t init_pt_va;
 
 #endif
 

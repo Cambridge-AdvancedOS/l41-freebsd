@@ -2183,6 +2183,21 @@ pci_ht_map_msi(device_t dev, uint64_t addr)
 }
 
 int
+pci_get_relaxed_ordering_enabled(device_t dev)
+{
+	struct pci_devinfo *dinfo = device_get_ivars(dev);
+	int cap;
+	uint16_t val;
+
+	cap = dinfo->cfg.pcie.pcie_location;
+	if (cap == 0)
+		return (0);
+	val = pci_read_config(dev, cap + PCIER_DEVICE_CTL, 2);
+	val &= PCIEM_CTL_RELAXED_ORD_ENABLE;
+	return (val != 0);
+}
+
+int
 pci_get_max_payload(device_t dev)
 {
 	struct pci_devinfo *dinfo = device_get_ivars(dev);
@@ -3135,6 +3150,16 @@ pci_bar_enabled(device_t dev, struct pci_map *pm)
 	if (PCIR_IS_BIOS(&dinfo->cfg, pm->pm_reg) &&
 	    !(pm->pm_value & PCIM_BIOS_ENABLE))
 		return (0);
+#ifdef PCI_IOV
+	if ((dinfo->cfg.flags & PCICFG_VF) != 0) {
+		struct pcicfg_iov *iov;
+
+		iov = dinfo->cfg.iov;
+		cmd = pci_read_config(iov->iov_pf,
+		    iov->iov_pos + PCIR_SRIOV_CTL, 2);
+		return ((cmd & PCIM_SRIOV_VF_MSE) != 0);
+	}
+#endif
 	cmd = pci_read_config(dev, PCIR_COMMAND, 2);
 	if (PCIR_IS_BIOS(&dinfo->cfg, pm->pm_reg) || PCI_BAR_MEM(pm->pm_value))
 		return ((cmd & PCIM_CMD_MEMEN) != 0);
@@ -4252,6 +4277,45 @@ pci_create_iov_child_method(device_t bus, device_t pf, uint16_t rid,
 }
 #endif
 
+/*
+ * For PCIe device set Max_Payload_Size to match PCIe root's.
+ */
+static void
+pcie_setup_mps(device_t dev)
+{
+	struct pci_devinfo *dinfo = device_get_ivars(dev);
+	device_t root;
+	uint16_t rmps, mmps, mps;
+
+	if (dinfo->cfg.pcie.pcie_location == 0)
+		return;
+	root = pci_find_pcie_root_port(dev);
+	if (root == NULL)
+		return;
+	/* Check whether the MPS is already configured. */
+	rmps = pcie_read_config(root, PCIER_DEVICE_CTL, 2) &
+	    PCIEM_CTL_MAX_PAYLOAD;
+	mps = pcie_read_config(dev, PCIER_DEVICE_CTL, 2) &
+	    PCIEM_CTL_MAX_PAYLOAD;
+	if (mps == rmps)
+		return;
+	/* Check whether the device is capable of the root's MPS. */
+	mmps = (pcie_read_config(dev, PCIER_DEVICE_CAP, 2) &
+	    PCIEM_CAP_MAX_PAYLOAD) << 5;
+	if (rmps > mmps) {
+		/*
+		 * The device is unable to handle root's MPS.  Limit root.
+		 * XXX: We should traverse through all the tree, applying
+		 * it to all the devices.
+		 */
+		pcie_adjust_config(root, PCIER_DEVICE_CTL,
+		    PCIEM_CTL_MAX_PAYLOAD, mmps, 2);
+	} else {
+		pcie_adjust_config(dev, PCIER_DEVICE_CTL,
+		    PCIEM_CTL_MAX_PAYLOAD, rmps, 2);
+	}
+}
+
 static void
 pci_add_child_clear_aer(device_t dev, struct pci_devinfo *dinfo)
 {
@@ -4339,6 +4403,7 @@ pci_add_child(device_t bus, struct pci_devinfo *dinfo)
 	pci_cfg_restore(dev, dinfo);
 	pci_print_verbose(dinfo);
 	pci_add_resources(bus, dev, 0, 0);
+	pcie_setup_mps(dev);
 	pci_child_added(dinfo->cfg.dev);
 
 	if (pci_clear_aer_on_attach)
@@ -4989,7 +5054,12 @@ pci_child_detached(device_t dev, device_t child)
 	if (resource_list_release_active(rl, dev, child, SYS_RES_IRQ) != 0)
 		pci_printf(&dinfo->cfg, "Device leaked IRQ resources\n");
 	if (dinfo->cfg.msi.msi_alloc != 0 || dinfo->cfg.msix.msix_alloc != 0) {
-		pci_printf(&dinfo->cfg, "Device leaked MSI vectors\n");
+		if (dinfo->cfg.msi.msi_alloc != 0)
+			pci_printf(&dinfo->cfg, "Device leaked %d MSI "
+			    "vectors\n", dinfo->cfg.msi.msi_alloc);
+		else
+			pci_printf(&dinfo->cfg, "Device leaked %d MSI-X "
+			    "vectors\n", dinfo->cfg.msix.msix_alloc);
 		(void)pci_release_msi(child);
 	}
 	if (resource_list_release_active(rl, dev, child, SYS_RES_MEMORY) != 0)
@@ -5304,7 +5374,7 @@ DB_SHOW_COMMAND(pciregs, db_pci_dump)
 }
 #endif /* DDB */
 
-static struct resource *
+struct resource *
 pci_reserve_map(device_t dev, device_t child, int type, int *rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int num,
     u_int flags)

@@ -258,6 +258,7 @@ struct inpcb {
 	volatile uint32_t inp_in_input; /* on input hpts (lock b) */
 #endif
 	volatile uint16_t  inp_hpts_cpu; /* Lock (i) */
+	volatile uint16_t  inp_irq_cpu;	/* Set by LRO in behalf of or the driver */
 	u_int	inp_refcount;		/* (i) refcount */
 	int	inp_flags;		/* (i) generic IP/datagram flags */
 	int	inp_flags2;		/* (i) generic IP/datagram flags #2*/
@@ -266,7 +267,8 @@ struct inpcb {
 			 inp_input_cpu_set : 1,	/* on input hpts (i) */
 			 inp_hpts_calls :1,	/* (i) from output hpts */
 			 inp_input_calls :1,	/* (i) from input hpts */
-			 inp_spare_bits2 : 4;
+			 inp_irq_cpu_set :1,	/* (i) from LRO/Driver */
+			 inp_spare_bits2 : 3;
 	uint8_t inp_numa_domain;	/* numa domain */
 	void	*inp_ppcb;		/* (i) pointer to per-protocol pcb */
 	struct	socket *inp_socket;	/* (i) back pointer to socket */
@@ -731,8 +733,8 @@ int	inp_so_options(const struct inpcb *inp);
 /*
  * Flags for inp_flags2.
  */
-#define	INP_2UNUSED1		0x00000001
-#define	INP_2UNUSED2		0x00000002
+#define	INP_MBUF_L_ACKS		0x00000001 /* We need large mbufs for ack compression */
+#define	INP_MBUF_ACKCMP		0x00000002 /* TCP mbuf ack compression ok */
 #define	INP_PCBGROUPWILD	0x00000004 /* in pcbgroup wildcard list */
 #define	INP_REUSEPORT		0x00000008 /* SO_REUSEPORT option is set */
 #define	INP_FREED		0x00000010 /* inp itself is not valid */

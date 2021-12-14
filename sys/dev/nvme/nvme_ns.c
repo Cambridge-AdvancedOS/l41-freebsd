@@ -231,10 +231,15 @@ nvme_ns_get_data(struct nvme_namespace *ns)
 uint32_t
 nvme_ns_get_stripesize(struct nvme_namespace *ns)
 {
+	uint32_t ss;
 
 	if (((ns->data.nsfeat >> NVME_NS_DATA_NSFEAT_NPVALID_SHIFT) &
-	    NVME_NS_DATA_NSFEAT_NPVALID_MASK) != 0 && ns->data.npwg != 0) {
-		return ((ns->data.npwg + 1) * nvme_ns_get_sector_size(ns));
+	    NVME_NS_DATA_NSFEAT_NPVALID_MASK) != 0) {
+		ss = nvme_ns_get_sector_size(ns);
+		if (ns->data.npwa != 0)
+			return ((ns->data.npwa + 1) * ss);
+		else if (ns->data.npwg != 0)
+			return ((ns->data.npwg + 1) * ss);
 	}
 	return (ns->boundary);
 }
@@ -473,7 +478,7 @@ nvme_ns_bio_process(struct nvme_namespace *ns, struct bio *bp,
 	case BIO_DELETE:
 		dsm_range =
 		    malloc(sizeof(struct nvme_dsm_range), M_NVME,
-		    M_ZERO | M_WAITOK);
+		    M_ZERO | M_NOWAIT);
 		if (!dsm_range) {
 			err = ENOMEM;
 			break;

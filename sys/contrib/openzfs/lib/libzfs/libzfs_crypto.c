@@ -51,12 +51,6 @@
  * technically ok if the salt is known to the attacker).
  */
 
-typedef enum key_locator {
-	KEY_LOCATOR_NONE,
-	KEY_LOCATOR_PROMPT,
-	KEY_LOCATOR_URI
-} key_locator_t;
-
 #define	MIN_PASSPHRASE_LEN 8
 #define	MAX_PASSPHRASE_LEN 512
 #define	MAX_KEY_PROMPT_ATTEMPTS 3
@@ -77,7 +71,7 @@ pkcs11_get_urandom(uint8_t *buf, size_t bytes)
 	int rand;
 	ssize_t bytes_read = 0;
 
-	rand = open("/dev/urandom", O_RDONLY);
+	rand = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
 
 	if (rand < 0)
 		return (rand);
@@ -474,11 +468,11 @@ get_key_material_file(libzfs_handle_t *hdl, const char *uri,
 	if (strlen(uri) < 7)
 		return (EINVAL);
 
-	if ((f = fopen(uri + 7, "r")) == NULL) {
+	if ((f = fopen(uri + 7, "re")) == NULL) {
 		ret = errno;
 		errno = 0;
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "Failed to open key material file"));
+		    "Failed to open key material file: %s"), strerror(ret));
 		return (ret);
 	}
 
@@ -518,7 +512,7 @@ get_key_material(libzfs_handle_t *hdl, boolean_t do_verify, boolean_t newkey,
 	switch (keyloc) {
 	case ZFS_KEYLOCATION_PROMPT:
 		if (isatty(fileno(stdin))) {
-			can_retry = B_TRUE;
+			can_retry = keyformat != ZFS_KEYFORMAT_RAW;
 			ret = get_key_interactive(hdl, fsname, keyformat,
 			    do_verify, newkey, &km, &kmlen);
 		} else {
@@ -532,6 +526,8 @@ get_key_material(libzfs_handle_t *hdl, boolean_t do_verify, boolean_t newkey,
 
 		break;
 	case ZFS_KEYLOCATION_URI:
+		ret = ENOTSUP;
+
 		for (handler = uri_handlers; handler->zuh_scheme != NULL;
 		    handler++) {
 			if (strcmp(handler->zuh_scheme, uri_scheme) != 0)
@@ -544,9 +540,11 @@ get_key_material(libzfs_handle_t *hdl, boolean_t do_verify, boolean_t newkey,
 			break;
 		}
 
-		ret = ENOTSUP;
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "URI scheme is not supported"));
+		if (ret == ENOTSUP) {
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "URI scheme is not supported"));
+			goto error;
+		}
 
 		break;
 	default:
@@ -956,7 +954,7 @@ zfs_crypto_create(libzfs_handle_t *hdl, char *parent_name, nvlist_t *props,
 		}
 
 		ret = populate_create_encryption_params_nvlists(hdl, NULL,
-		    B_FALSE, keyformat, keylocation, props, &wkeydata,
+		    B_TRUE, keyformat, keylocation, props, &wkeydata,
 		    &wkeylen);
 		if (ret != 0)
 			goto out;

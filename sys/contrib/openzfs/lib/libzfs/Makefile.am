@@ -1,5 +1,4 @@
 include $(top_srcdir)/config/Rules.am
-PHONY =
 
 VPATH = \
 	$(top_srcdir)/module/icp \
@@ -88,7 +87,9 @@ if BUILD_FREEBSD
 libzfs_la_LIBADD += -lutil -lgeom
 endif
 
-libzfs_la_LDFLAGS += -version-info 4:0:0
+libzfs_la_LDFLAGS += -version-info 5:0:1
+
+include $(top_srcdir)/config/CppCheck.am
 
 # Library ABI
 EXTRA_DIST = libzfs.abi libzfs.suppr

@@ -295,6 +295,9 @@ static	int vlan_snd_tag_modify(struct m_snd_tag *,
 static	int vlan_snd_tag_query(struct m_snd_tag *,
     union if_snd_tag_query_params *);
 static	void vlan_snd_tag_free(struct m_snd_tag *);
+static struct m_snd_tag *vlan_next_snd_tag(struct m_snd_tag *);
+static void vlan_ratelimit_query(struct ifnet *,
+    struct if_ratelimit_query_results *);
 #endif
 static	void vlan_qflush(struct ifnet *ifp);
 static	int vlan_setflag(struct ifnet *ifp, int flag, int status,
@@ -302,6 +305,10 @@ static	int vlan_setflag(struct ifnet *ifp, int flag, int status,
 static	int vlan_setflags(struct ifnet *ifp, int status);
 static	int vlan_setmulti(struct ifnet *ifp);
 static	int vlan_transmit(struct ifnet *ifp, struct mbuf *m);
+#ifdef ALTQ
+static void vlan_altq_start(struct ifnet *ifp);
+static	int vlan_altq_transmit(struct ifnet *ifp, struct mbuf *m);
+#endif
 static	int vlan_output(struct ifnet *ifp, struct mbuf *m,
     const struct sockaddr *dst, struct route *ro);
 static	void vlan_unconfig(struct ifnet *ifp);
@@ -606,6 +613,7 @@ vlan_setmulti(struct ifnet *ifp)
 		mc = malloc(sizeof(struct vlan_mc_entry), M_VLAN, M_NOWAIT);
 		if (mc == NULL) {
 			IF_ADDR_WUNLOCK(ifp);
+			CURVNET_RESTORE();
 			return (ENOMEM);
 		}
 		bcopy(ifma->ifma_addr, &mc->mc_addr, ifma->ifma_addr->sa_len);
@@ -616,8 +624,10 @@ vlan_setmulti(struct ifnet *ifp)
 	CK_SLIST_FOREACH (mc, &sc->vlan_mc_listhead, mc_entries) {
 		error = if_addmulti(ifp_p, (struct sockaddr *)&mc->mc_addr,
 		    NULL);
-		if (error)
+		if (error) {
+			CURVNET_RESTORE();
 			return (error);
+		}
 	}
 
 	CURVNET_RESTORE();
@@ -1012,6 +1022,10 @@ vlan_clone_create(struct if_clone *ifc, char *name, size_t len, caddr_t params)
 		vid = vlr.vlr_tag;
 		proto = vlr.vlr_proto;
 
+#ifdef COMPAT_FREEBSD12
+		if (proto == 0)
+			proto = ETHERTYPE_VLAN;
+#endif
 		p = ifunit_ref(vlr.vlr_parent);
 		if (p == NULL)
 			return (ENXIO);
@@ -1087,7 +1101,15 @@ vlan_clone_create(struct if_clone *ifc, char *name, size_t len, caddr_t params)
 	ifp->if_dunit = unit;
 
 	ifp->if_init = vlan_init;
+#ifdef ALTQ
+	ifp->if_start = vlan_altq_start;
+	ifp->if_transmit = vlan_altq_transmit;
+	IFQ_SET_MAXLEN(&ifp->if_snd, ifqmaxlen);
+	ifp->if_snd.ifq_drv_maxlen = 0;
+	IFQ_SET_READY(&ifp->if_snd);
+#else
 	ifp->if_transmit = vlan_transmit;
+#endif
 	ifp->if_qflush = vlan_qflush;
 	ifp->if_ioctl = vlan_ioctl;
 #if defined(KERN_TLS) || defined(RATELIMIT)
@@ -1095,6 +1117,8 @@ vlan_clone_create(struct if_clone *ifc, char *name, size_t len, caddr_t params)
 	ifp->if_snd_tag_modify = vlan_snd_tag_modify;
 	ifp->if_snd_tag_query = vlan_snd_tag_query;
 	ifp->if_snd_tag_free = vlan_snd_tag_free;
+	ifp->if_next_snd_tag = vlan_next_snd_tag;
+	ifp->if_ratelimit_query = vlan_ratelimit_query;
 #endif
 	ifp->if_flags = VLAN_IFFLAGS;
 	ether_ifattach(ifp, eaddr);
@@ -1138,6 +1162,9 @@ vlan_clone_destroy(struct if_clone *ifc, struct ifnet *ifp)
 	if (ifp->if_vlantrunk)
 		return (EBUSY);
 
+#ifdef ALTQ
+	IFQ_PURGE(&ifp->if_snd);
+#endif
 	ether_ifdetach(ifp);	/* first, remove it from system-wide lists */
 	vlan_unconfig(ifp);	/* now it can be unconfigured and freed */
 	/*
@@ -1258,6 +1285,38 @@ vlan_output(struct ifnet *ifp, struct mbuf *m, const struct sockaddr *dst,
 
 	return p->if_output(ifp, m, dst, ro);
 }
+
+#ifdef ALTQ
+static void
+vlan_altq_start(if_t ifp)
+{
+	struct ifaltq *ifq = &ifp->if_snd;
+	struct mbuf *m;
+
+	IFQ_LOCK(ifq);
+	IFQ_DEQUEUE_NOLOCK(ifq, m);
+	while (m != NULL) {
+		vlan_transmit(ifp, m);
+		IFQ_DEQUEUE_NOLOCK(ifq, m);
+	}
+	IFQ_UNLOCK(ifq);
+}
+
+static int
+vlan_altq_transmit(if_t ifp, struct mbuf *m)
+{
+	int err;
+
+	if (ALTQ_IS_ENABLED(&ifp->if_snd)) {
+		IFQ_ENQUEUE(&ifp->if_snd, m, err);
+		if (err == 0)
+			vlan_altq_start(ifp);
+	} else
+		err = vlan_transmit(ifp, m);
+
+	return (err);
+}
+#endif	/* ALTQ */
 
 /*
  * The ifp->if_qflush entry point for vlan(4) is a no-op.
@@ -1942,6 +2001,10 @@ vlan_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			error = ENOENT;
 			break;
 		}
+#ifdef COMPAT_FREEBSD12
+		if (vlr.vlr_proto == 0)
+			vlr.vlr_proto = ETHERTYPE_VLAN;
+#endif
 		oldmtu = ifp->if_mtu;
 		error = vlan_config(ifv, p, vlr.vlr_tag, vlr.vlr_proto);
 		if_rele(p);
@@ -2024,7 +2087,7 @@ vlan_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		error = priv_check(curthread, PRIV_NET_SETVLANPCP);
 		if (error)
 			break;
-		if (ifr->ifr_vlan_pcp > 7) {
+		if (ifr->ifr_vlan_pcp > VLAN_PCP_MAX) {
 			error = EINVAL;
 			break;
 		}
@@ -2100,6 +2163,15 @@ vlan_snd_tag_alloc(struct ifnet *ifp,
 	return (0);
 }
 
+static struct m_snd_tag *
+vlan_next_snd_tag(struct m_snd_tag *mst)
+{
+	struct vlan_snd_tag *vst;
+
+	vst = mst_to_vst(mst);
+	return (vst->tag);
+}
+
 static int
 vlan_snd_tag_modify(struct m_snd_tag *mst,
     union if_snd_tag_modify_params *params)
@@ -2129,4 +2201,20 @@ vlan_snd_tag_free(struct m_snd_tag *mst)
 	m_snd_tag_rele(vst->tag);
 	free(vst, M_VLAN);
 }
+
+static void
+vlan_ratelimit_query(struct ifnet *ifp __unused, struct if_ratelimit_query_results *q)
+{
+	/*
+	 * For vlan, we have an indirect
+	 * interface. The caller needs to
+	 * get a ratelimit tag on the actual
+	 * interface the flow will go on.
+	 */
+	q->rate_table = NULL;
+	q->flags = RT_IS_INDIRECT;
+	q->max_flows = 0;
+	q->number_of_rates = 0;
+}
+
 #endif

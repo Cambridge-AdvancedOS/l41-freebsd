@@ -379,7 +379,6 @@ ip_init(void)
 static void
 ip_destroy(void *unused __unused)
 {
-	struct ifnet *ifp;
 	int error;
 
 #ifdef	RSS
@@ -405,10 +404,7 @@ ip_destroy(void *unused __unused)
 	in_ifscrub_all();
 
 	/* Make sure the IPv4 routes are gone as well. */
-	IFNET_RLOCK();
-	CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link)
-		rt_flushifroutes_af(ifp, AF_INET);
-	IFNET_RUNLOCK();
+	rib_flush_routes_family(AF_INET);
 
 	/* Destroy IP reassembly queue. */
 	ipreass_destroy();
@@ -740,14 +736,12 @@ passin:
 		}
 		ia = NULL;
 	}
-	/* RFC 3927 2.7: Do not forward datagrams for 169.254.0.0/16. */
-	if (IN_LINKLOCAL(ntohl(ip->ip_dst.s_addr))) {
-		IPSTAT_INC(ips_cantforward);
-		m_freem(m);
-		return;
-	}
 	if (IN_MULTICAST(ntohl(ip->ip_dst.s_addr))) {
-		if (V_ip_mrouter) {
+		/*
+		 * RFC 3927 2.7: Do not forward multicast packets from
+		 * IN_LINKLOCAL.
+		 */
+		if (V_ip_mrouter && !IN_LINKLOCAL(ntohl(ip->ip_src.s_addr))) {
 			/*
 			 * If we are acting as a multicast router, all
 			 * incoming multicast packets are passed to the
@@ -782,6 +776,13 @@ passin:
 		goto ours;
 	if (ip->ip_dst.s_addr == INADDR_ANY)
 		goto ours;
+	/* RFC 3927 2.7: Do not forward packets to or from IN_LINKLOCAL. */
+	if (IN_LINKLOCAL(ntohl(ip->ip_dst.s_addr)) ||
+	    IN_LINKLOCAL(ntohl(ip->ip_src.s_addr))) {
+		IPSTAT_INC(ips_cantforward);
+		m_freem(m);
+		return;
+	}
 
 	/*
 	 * Not for us; forward if possible and desirable.
@@ -1057,13 +1058,16 @@ ip_forward(struct mbuf *m, int srcrt)
 
 			if (nh_ia != NULL &&
 			    (src & nh_ia->ia_subnetmask) == nh_ia->ia_subnet) {
-				if (nh->nh_flags & NHF_GATEWAY)
-					dest.s_addr = nh->gw4_sa.sin_addr.s_addr;
-				else
-					dest.s_addr = ip->ip_dst.s_addr;
 				/* Router requirements says to only send host redirects */
 				type = ICMP_REDIRECT;
 				code = ICMP_REDIRECT_HOST;
+				if (nh->nh_flags & NHF_GATEWAY) {
+				    if (nh->gw_sa.sa_family == AF_INET)
+					dest.s_addr = nh->gw4_sa.sin_addr.s_addr;
+				    else /* Do not redirect in case gw is AF_INET6 */
+					type = 0;
+				} else
+					dest.s_addr = ip->ip_dst.s_addr;
 			}
 		}
 	}

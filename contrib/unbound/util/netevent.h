@@ -70,6 +70,7 @@ struct comm_point;
 struct comm_reply;
 struct tcl_list;
 struct ub_event_base;
+struct unbound_socket;
 
 struct mesh_state;
 struct mesh_area;
@@ -166,6 +167,10 @@ struct comm_reply {
 struct comm_point {
 	/** behind the scenes structure, with say libevent info. alloced. */
 	struct internal_event* ev;
+	/** if the event is added or not */
+	int event_added;
+
+	struct unbound_socket* socket;
 
 	/** file descriptor for communication point */
 	int fd;
@@ -493,12 +498,13 @@ struct ub_event_base* comm_base_internal(struct comm_base* b);
  * @param buffer: shared buffer by UDP sockets from this thread.
  * @param callback: callback function pointer.
  * @param callback_arg: will be passed to your callback function.
+ * @param socket: and opened socket properties will be passed to your callback function.
  * @return: returns the allocated communication point. NULL on error.
  * Sets timeout to NULL. Turns off TCP options.
  */
 struct comm_point* comm_point_create_udp(struct comm_base* base,
 	int fd, struct sldns_buffer* buffer, 
-	comm_point_callback_type* callback, void* callback_arg);
+	comm_point_callback_type* callback, void* callback_arg, struct unbound_socket* socket);
 
 /**
  * Create an UDP with ancillary data comm point. Calls malloc.
@@ -509,12 +515,13 @@ struct comm_point* comm_point_create_udp(struct comm_base* base,
  * @param buffer: shared buffer by UDP sockets from this thread.
  * @param callback: callback function pointer.
  * @param callback_arg: will be passed to your callback function.
+ * @param socket: and opened socket properties will be passed to your callback function.
  * @return: returns the allocated communication point. NULL on error.
  * Sets timeout to NULL. Turns off TCP options.
  */
 struct comm_point* comm_point_create_udp_ancil(struct comm_base* base,
 	int fd, struct sldns_buffer* buffer, 
-	comm_point_callback_type* callback, void* callback_arg);
+	comm_point_callback_type* callback, void* callback_arg, struct unbound_socket* socket);
 
 /**
  * Create a TCP listener comm point. Calls malloc.
@@ -537,6 +544,7 @@ struct comm_point* comm_point_create_udp_ancil(struct comm_base* base,
  * 	to select handler type to use.
  * @param callback: callback function pointer for TCP handlers.
  * @param callback_arg: will be passed to your callback function.
+ * @param socket: and opened socket properties will be passed to your callback function.
  * @return: returns the TCP listener commpoint. You can find the
  *  	TCP handlers in the array inside the listener commpoint.
  *	returns NULL on error.
@@ -548,7 +556,7 @@ struct comm_point* comm_point_create_tcp(struct comm_base* base,
 	struct tcl_list* tcp_conn_limit,
 	size_t bufsize, struct sldns_buffer* spoolbuf,
 	enum listen_type port_type,
-	comm_point_callback_type* callback, void* callback_arg);
+	comm_point_callback_type* callback, void* callback_arg, struct unbound_socket* socket);
 
 /**
  * Create an outgoing TCP commpoint. No file descriptor is opened, left at -1.
@@ -663,6 +671,16 @@ void comm_point_start_listening(struct comm_point* c, int newfd, int msec);
 void comm_point_listen_for_rw(struct comm_point* c, int rd, int wr);
 
 /**
+ * For TCP handlers that use c->tcp_timeout_msec, this routine adjusts
+ * it with the minimum.  Otherwise, a 0 value advertised without the
+ * minimum applied moves to a 0 in comm_point_start_listening and that
+ * routine treats it as no timeout, listen forever, which is not wanted.
+ * @param c: comm point to use the tcp_timeout_msec of.
+ * @return adjusted tcp_timeout_msec value with the minimum if smaller.
+ */
+int adjusted_tcp_timeout(struct comm_point* c);
+
+/**
  * Get size of memory used by comm point.
  * For TCP handlers this includes subhandlers.
  * For UDP handlers, this does not include the (shared) UDP buffer.
@@ -725,7 +743,7 @@ struct comm_signal* comm_signal_create(struct comm_base* base,
 	void (*callback)(int, void*), void* cb_arg);
 
 /**
- * Bind signal struct to catch a signal. A signle comm_signal can be bound
+ * Bind signal struct to catch a signal. A single comm_signal can be bound
  * to multiple signals, calling comm_signal_bind multiple times.
  * @param comsig: the communication point, with callback information.
  * @param sig: signal number.

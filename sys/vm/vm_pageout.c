@@ -539,13 +539,13 @@ vm_pageout_flush(vm_page_t *mc, int count, int flags, int mreq, int *prunlen,
 			 * the PQ_UNSWAPPABLE holding queue.  This is an
 			 * optimization that prevents the page daemon from
 			 * wasting CPU cycles on pages that cannot be reclaimed
-			 * becase no swap device is configured.
+			 * because no swap device is configured.
 			 *
 			 * Otherwise, reactivate the page so that it doesn't
 			 * clog the laundry and inactive queues.  (We will try
 			 * paging it out again later.)
 			 */
-			if (object->type == OBJT_SWAP &&
+			if ((object->flags & OBJ_SWAP) != 0 &&
 			    pageout_status[i] == VM_PAGER_FAIL) {
 				vm_page_unswappable(mt);
 				numpagedout++;
@@ -606,7 +606,7 @@ vm_pageout_clean(vm_page_t m, int *numpagedout)
 	struct mount *mp;
 	vm_object_t object;
 	vm_pindex_t pindex;
-	int error, lockmode;
+	int error;
 
 	object = m->object;
 	VM_OBJECT_ASSERT_WLOCKED(object);
@@ -640,9 +640,7 @@ vm_pageout_clean(vm_page_t m, int *numpagedout)
 		vm_object_reference_locked(object);
 		pindex = m->pindex;
 		VM_OBJECT_WUNLOCK(object);
-		lockmode = MNT_SHARED_WRITES(vp->v_mount) ?
-		    LK_SHARED : LK_EXCLUSIVE;
-		if (vget(vp, lockmode | LK_TIMELOCK)) {
+		if (vget(vp, vn_lktype_write(NULL, vp) | LK_TIMELOCK) != 0) {
 			vp = NULL;
 			error = EDEADLK;
 			goto unlock_mp;
@@ -897,7 +895,7 @@ free_page:
 			vm_page_free(m);
 			VM_CNT_INC(v_dfree);
 		} else if ((object->flags & OBJ_DEAD) == 0) {
-			if (object->type != OBJT_SWAP &&
+			if ((object->flags & OBJ_SWAP) == 0 &&
 			    object->type != OBJT_DEFAULT)
 				pageout_ok = true;
 			else if (disable_swap_pageouts)
@@ -1887,14 +1885,9 @@ vm_pageout_oom_pagecount(struct vmspace *vmspace)
 		if ((entry->eflags & MAP_ENTRY_NEEDS_COPY) != 0 &&
 		    obj->ref_count != 1)
 			continue;
-		switch (obj->type) {
-		case OBJT_DEFAULT:
-		case OBJT_SWAP:
-		case OBJT_PHYS:
-		case OBJT_VNODE:
+		if (obj->type == OBJT_DEFAULT || obj->type == OBJT_PHYS ||
+		    obj->type == OBJT_VNODE || (obj->flags & OBJ_SWAP) != 0)
 			res += obj->resident_page_count;
-			break;
-		}
 	}
 	return (res);
 }

@@ -63,6 +63,27 @@ __FBSDID("$FreeBSD$");
 #include <dev/iscsi/iscsi_proto.h>
 #include <icl_conn_if.h>
 
+#define ICL_CONN_STATE_BHS		1
+#define ICL_CONN_STATE_AHS		2
+#define ICL_CONN_STATE_HEADER_DIGEST	3
+#define ICL_CONN_STATE_DATA		4
+#define ICL_CONN_STATE_DATA_DIGEST	5
+
+struct icl_soft_conn {
+	struct icl_conn	 ic;
+
+	/* soft specific stuff goes here. */
+	STAILQ_HEAD(, icl_pdu) to_send;
+	struct cv	 send_cv;
+	struct cv	 receive_cv;
+	struct icl_pdu	*receive_pdu;
+	size_t		 receive_len;
+	int		 receive_state;
+	bool		 receive_running;
+	bool		 check_send_space;
+	bool		 send_running;
+};
+
 struct icl_soft_pdu {
 	struct icl_pdu	 ip;
 
@@ -101,11 +122,6 @@ static MALLOC_DEFINE(M_ICL_SOFT, "icl_soft", "iSCSI software backend");
 static uma_zone_t icl_soft_pdu_zone;
 
 static volatile u_int	icl_ncons;
-
-#define ICL_CONN_LOCK(X)		mtx_lock(X->ic_lock)
-#define ICL_CONN_UNLOCK(X)		mtx_unlock(X->ic_lock)
-#define ICL_CONN_LOCK_ASSERT(X)		mtx_assert(X->ic_lock, MA_OWNED)
-#define ICL_CONN_LOCK_ASSERT_NOT(X)	mtx_assert(X->ic_lock, MA_NOTOWNED)
 
 STAILQ_HEAD(icl_pdu_stailq, icl_pdu);
 
@@ -150,7 +166,7 @@ static kobj_method_t icl_soft_methods[] = {
 	{ 0, 0 }
 };
 
-DEFINE_CLASS(icl_soft, icl_soft_methods, sizeof(struct icl_conn));
+DEFINE_CLASS(icl_soft, icl_soft_methods, sizeof(struct icl_soft_conn));
 
 static void
 icl_conn_fail(struct icl_conn *ic)
@@ -163,68 +179,6 @@ icl_conn_fail(struct icl_conn *ic)
 	 */
 	ic->ic_socket->so_error = EDOOFUS;
 	(ic->ic_error)(ic);
-}
-
-static struct mbuf *
-icl_conn_receive(struct icl_conn *ic, size_t len)
-{
-	struct uio uio;
-	struct socket *so;
-	struct mbuf *m;
-	int error, flags;
-
-	so = ic->ic_socket;
-
-	memset(&uio, 0, sizeof(uio));
-	uio.uio_resid = len;
-
-	flags = MSG_DONTWAIT;
-	error = soreceive(so, NULL, &uio, &m, NULL, &flags);
-	if (error != 0) {
-		ICL_DEBUG("soreceive error %d", error);
-		return (NULL);
-	}
-	if (uio.uio_resid != 0) {
-		m_freem(m);
-		ICL_DEBUG("short read");
-		return (NULL);
-	}
-
-	return (m);
-}
-
-static int
-icl_conn_receive_buf(struct icl_conn *ic, void *buf, size_t len)
-{
-	struct iovec iov[1];
-	struct uio uio;
-	struct socket *so;
-	int error, flags;
-
-	so = ic->ic_socket;
-
-	memset(&uio, 0, sizeof(uio));
-	iov[0].iov_base = buf;
-	iov[0].iov_len = len;
-	uio.uio_iov = iov;
-	uio.uio_iovcnt = 1;
-	uio.uio_offset = 0;
-	uio.uio_resid = len;
-	uio.uio_segflg = UIO_SYSSPACE;
-	uio.uio_rw = UIO_READ;
-
-	flags = MSG_DONTWAIT;
-	error = soreceive(so, NULL, &uio, NULL, NULL, &flags);
-	if (error != 0) {
-		ICL_DEBUG("soreceive error %d", error);
-		return (-1);
-	}
-	if (uio.uio_resid != 0) {
-		ICL_DEBUG("short read");
-		return (-1);
-	}
-
-	return (0);
 }
 
 static void
@@ -384,37 +338,28 @@ icl_pdu_size(const struct icl_pdu *response)
 	return (len);
 }
 
-static int
-icl_pdu_receive_bhs(struct icl_pdu *request, size_t *availablep)
+static void
+icl_soft_receive_buf(struct mbuf **r, size_t *rs, void *buf, size_t s)
 {
 
-	if (icl_conn_receive_buf(request->ip_conn,
-	    request->ip_bhs, sizeof(struct iscsi_bhs))) {
-		ICL_DEBUG("failed to receive BHS");
-		return (-1);
-	}
-
-	*availablep -= sizeof(struct iscsi_bhs);
-	return (0);
+	m_copydata(*r, 0, s, buf);
+	m_adj(*r, s);
+	while ((*r) != NULL && (*r)->m_len == 0)
+		*r = m_free(*r);
+	*rs -= s;
 }
 
-static int
-icl_pdu_receive_ahs(struct icl_pdu *request, size_t *availablep)
+static void
+icl_pdu_receive_ahs(struct icl_pdu *request, struct mbuf **r, size_t *rs)
 {
 
 	request->ip_ahs_len = icl_pdu_ahs_length(request);
 	if (request->ip_ahs_len == 0)
-		return (0);
+		return;
 
-	request->ip_ahs_mbuf = icl_conn_receive(request->ip_conn,
-	    request->ip_ahs_len);
-	if (request->ip_ahs_mbuf == NULL) {
-		ICL_DEBUG("failed to receive AHS");
-		return (-1);
-	}
-
-	*availablep -= request->ip_ahs_len;
-	return (0);
+	request->ip_ahs_mbuf = *r;
+	*r = m_split(request->ip_ahs_mbuf, request->ip_ahs_len, M_WAITOK);
+	*rs -= request->ip_ahs_len;
 }
 
 static uint32_t
@@ -433,7 +378,7 @@ icl_mbuf_to_crc32c(const struct mbuf *m0)
 }
 
 static int
-icl_pdu_check_header_digest(struct icl_pdu *request, size_t *availablep)
+icl_pdu_check_header_digest(struct icl_pdu *request, struct mbuf **r, size_t *rs)
 {
 	uint32_t received_digest, valid_digest;
 
@@ -441,12 +386,7 @@ icl_pdu_check_header_digest(struct icl_pdu *request, size_t *availablep)
 		return (0);
 
 	CTASSERT(sizeof(received_digest) == ISCSI_HEADER_DIGEST_SIZE);
-	if (icl_conn_receive_buf(request->ip_conn,
-	    &received_digest, ISCSI_HEADER_DIGEST_SIZE)) {
-		ICL_DEBUG("failed to receive header digest");
-		return (-1);
-	}
-	*availablep -= ISCSI_HEADER_DIGEST_SIZE;
+	icl_soft_receive_buf(r, rs, &received_digest, ISCSI_HEADER_DIGEST_SIZE);
 
 	/* Temporary attach AHS to BHS to calculate header digest. */
 	request->ip_bhs_mbuf->m_next = request->ip_ahs_mbuf;
@@ -514,17 +454,17 @@ icl_pdu_data_segment_receive_len(const struct icl_pdu *request)
 }
 
 static int
-icl_pdu_receive_data_segment(struct icl_pdu *request,
-    size_t *availablep, bool *more_neededp)
+icl_pdu_receive_data_segment(struct icl_pdu *request, struct mbuf **r,
+    size_t *rs, bool *more_neededp)
 {
-	struct icl_conn *ic;
+	struct icl_soft_conn *isc;
 	size_t len, padding = 0;
 	struct mbuf *m;
 
-	ic = request->ip_conn;
+	isc = (struct icl_soft_conn *)request->ip_conn;
 
 	*more_neededp = false;
-	ic->ic_receive_len = 0;
+	isc->receive_len = 0;
 
 	len = icl_pdu_data_segment_length(request);
 	if (len == 0)
@@ -539,7 +479,7 @@ icl_pdu_receive_data_segment(struct icl_pdu *request,
 	KASSERT(len > request->ip_data_len, ("len <= request->ip_data_len"));
 	len -= request->ip_data_len;
 
-	if (len + padding > *availablep) {
+	if (len + padding > *rs) {
 		/*
 		 * Not enough data in the socket buffer.  Receive as much
 		 * as we can.  Don't receive padding, since, obviously, it's
@@ -547,9 +487,9 @@ icl_pdu_receive_data_segment(struct icl_pdu *request,
 		 */
 #if 0
 		ICL_DEBUG("limited from %zd to %zd",
-		    len + padding, *availablep - padding));
+		    len + padding, *rs - padding));
 #endif
-		len = *availablep - padding;
+		len = *rs - padding;
 		*more_neededp = true;
 		padding = 0;
 	}
@@ -559,11 +499,9 @@ icl_pdu_receive_data_segment(struct icl_pdu *request,
 	 * of actual data segment.
 	 */
 	if (len > 0) {
-		m = icl_conn_receive(request->ip_conn, len + padding);
-		if (m == NULL) {
-			ICL_DEBUG("failed to receive data segment");
-			return (-1);
-		}
+		m = *r;
+		*r = m_split(m, len + padding, M_WAITOK);
+		*rs -= len + padding;
 
 		if (request->ip_data_mbuf == NULL)
 			request->ip_data_mbuf = m;
@@ -571,19 +509,17 @@ icl_pdu_receive_data_segment(struct icl_pdu *request,
 			m_cat(request->ip_data_mbuf, m);
 
 		request->ip_data_len += len;
-		*availablep -= len + padding;
 	} else
 		ICL_DEBUG("len 0");
 
 	if (*more_neededp)
-		ic->ic_receive_len =
-		    icl_pdu_data_segment_receive_len(request);
+		isc->receive_len = icl_pdu_data_segment_receive_len(request);
 
 	return (0);
 }
 
 static int
-icl_pdu_check_data_digest(struct icl_pdu *request, size_t *availablep)
+icl_pdu_check_data_digest(struct icl_pdu *request, struct mbuf **r, size_t *rs)
 {
 	uint32_t received_digest, valid_digest;
 
@@ -594,12 +530,7 @@ icl_pdu_check_data_digest(struct icl_pdu *request, size_t *availablep)
 		return (0);
 
 	CTASSERT(sizeof(received_digest) == ISCSI_DATA_DIGEST_SIZE);
-	if (icl_conn_receive_buf(request->ip_conn,
-	    &received_digest, ISCSI_DATA_DIGEST_SIZE)) {
-		ICL_DEBUG("failed to receive data digest");
-		return (-1);
-	}
-	*availablep -= ISCSI_DATA_DIGEST_SIZE;
+	icl_soft_receive_buf(r, rs, &received_digest, ISCSI_DATA_DIGEST_SIZE);
 
 	/*
 	 * Note that ip_data_mbuf also contains padding; since digest
@@ -621,19 +552,17 @@ icl_pdu_check_data_digest(struct icl_pdu *request, size_t *availablep)
  * "part" of PDU at a time; call it repeatedly until it returns non-NULL.
  */
 static struct icl_pdu *
-icl_conn_receive_pdu(struct icl_conn *ic, size_t *availablep)
+icl_conn_receive_pdu(struct icl_soft_conn *isc, struct mbuf **r, size_t *rs)
 {
+	struct icl_conn *ic = &isc->ic;
 	struct icl_pdu *request;
-	struct socket *so;
 	size_t len;
-	int error;
+	int error = 0;
 	bool more_needed;
 
-	so = ic->ic_socket;
-
-	if (ic->ic_receive_state == ICL_CONN_STATE_BHS) {
-		KASSERT(ic->ic_receive_pdu == NULL,
-		    ("ic->ic_receive_pdu != NULL"));
+	if (isc->receive_state == ICL_CONN_STATE_BHS) {
+		KASSERT(isc->receive_pdu == NULL,
+		    ("isc->receive_pdu != NULL"));
 		request = icl_soft_conn_new_pdu(ic, M_NOWAIT);
 		if (request == NULL) {
 			ICL_DEBUG("failed to allocate PDU; "
@@ -641,30 +570,18 @@ icl_conn_receive_pdu(struct icl_conn *ic, size_t *availablep)
 			icl_conn_fail(ic);
 			return (NULL);
 		}
-		ic->ic_receive_pdu = request;
+		isc->receive_pdu = request;
 	} else {
-		KASSERT(ic->ic_receive_pdu != NULL,
-		    ("ic->ic_receive_pdu == NULL"));
-		request = ic->ic_receive_pdu;
+		KASSERT(isc->receive_pdu != NULL,
+		    ("isc->receive_pdu == NULL"));
+		request = isc->receive_pdu;
 	}
 
-	if (*availablep < ic->ic_receive_len) {
-#if 0
-		ICL_DEBUG("not enough data; need %zd, "
-		    "have %zd", ic->ic_receive_len, *availablep);
-#endif
-		return (NULL);
-	}
-
-	switch (ic->ic_receive_state) {
+	switch (isc->receive_state) {
 	case ICL_CONN_STATE_BHS:
 		//ICL_DEBUG("receiving BHS");
-		error = icl_pdu_receive_bhs(request, availablep);
-		if (error != 0) {
-			ICL_DEBUG("failed to receive BHS; "
-			    "dropping connection");
-			break;
-		}
+		icl_soft_receive_buf(r, rs, request->ip_bhs,
+		    sizeof(struct iscsi_bhs));
 
 		/*
 		 * We don't enforce any limit for AHS length;
@@ -672,7 +589,7 @@ icl_conn_receive_pdu(struct icl_conn *ic, size_t *availablep)
 		 */
 
 		len = icl_pdu_data_segment_length(request);
-		if (len > ic->ic_max_data_segment_length) {
+		if (len > ic->ic_max_recv_data_segment_length) {
 			ICL_WARN("received data segment "
 			    "length %zd is larger than negotiated; "
 			    "dropping connection", len);
@@ -680,42 +597,36 @@ icl_conn_receive_pdu(struct icl_conn *ic, size_t *availablep)
 			break;
 		}
 
-		ic->ic_receive_state = ICL_CONN_STATE_AHS;
-		ic->ic_receive_len = icl_pdu_ahs_length(request);
+		isc->receive_state = ICL_CONN_STATE_AHS;
+		isc->receive_len = icl_pdu_ahs_length(request);
 		break;
 
 	case ICL_CONN_STATE_AHS:
 		//ICL_DEBUG("receiving AHS");
-		error = icl_pdu_receive_ahs(request, availablep);
-		if (error != 0) {
-			ICL_DEBUG("failed to receive AHS; "
-			    "dropping connection");
-			break;
-		}
-		ic->ic_receive_state = ICL_CONN_STATE_HEADER_DIGEST;
+		icl_pdu_receive_ahs(request, r, rs);
+		isc->receive_state = ICL_CONN_STATE_HEADER_DIGEST;
 		if (ic->ic_header_crc32c == false)
-			ic->ic_receive_len = 0;
+			isc->receive_len = 0;
 		else
-			ic->ic_receive_len = ISCSI_HEADER_DIGEST_SIZE;
+			isc->receive_len = ISCSI_HEADER_DIGEST_SIZE;
 		break;
 
 	case ICL_CONN_STATE_HEADER_DIGEST:
 		//ICL_DEBUG("receiving header digest");
-		error = icl_pdu_check_header_digest(request, availablep);
+		error = icl_pdu_check_header_digest(request, r, rs);
 		if (error != 0) {
 			ICL_DEBUG("header digest failed; "
 			    "dropping connection");
 			break;
 		}
 
-		ic->ic_receive_state = ICL_CONN_STATE_DATA;
-		ic->ic_receive_len =
-		    icl_pdu_data_segment_receive_len(request);
+		isc->receive_state = ICL_CONN_STATE_DATA;
+		isc->receive_len = icl_pdu_data_segment_receive_len(request);
 		break;
 
 	case ICL_CONN_STATE_DATA:
 		//ICL_DEBUG("receiving data segment");
-		error = icl_pdu_receive_data_segment(request, availablep,
+		error = icl_pdu_receive_data_segment(request, r, rs,
 		    &more_needed);
 		if (error != 0) {
 			ICL_DEBUG("failed to receive data segment;"
@@ -726,16 +637,16 @@ icl_conn_receive_pdu(struct icl_conn *ic, size_t *availablep)
 		if (more_needed)
 			break;
 
-		ic->ic_receive_state = ICL_CONN_STATE_DATA_DIGEST;
+		isc->receive_state = ICL_CONN_STATE_DATA_DIGEST;
 		if (request->ip_data_len == 0 || ic->ic_data_crc32c == false)
-			ic->ic_receive_len = 0;
+			isc->receive_len = 0;
 		else
-			ic->ic_receive_len = ISCSI_DATA_DIGEST_SIZE;
+			isc->receive_len = ISCSI_DATA_DIGEST_SIZE;
 		break;
 
 	case ICL_CONN_STATE_DATA_DIGEST:
 		//ICL_DEBUG("receiving data digest");
-		error = icl_pdu_check_data_digest(request, availablep);
+		error = icl_pdu_check_data_digest(request, r, rs);
 		if (error != 0) {
 			ICL_DEBUG("data digest failed; "
 			    "dropping connection");
@@ -746,18 +657,18 @@ icl_conn_receive_pdu(struct icl_conn *ic, size_t *availablep)
 		 * We've received complete PDU; reset the receive state machine
 		 * and return the PDU.
 		 */
-		ic->ic_receive_state = ICL_CONN_STATE_BHS;
-		ic->ic_receive_len = sizeof(struct iscsi_bhs);
-		ic->ic_receive_pdu = NULL;
+		isc->receive_state = ICL_CONN_STATE_BHS;
+		isc->receive_len = sizeof(struct iscsi_bhs);
+		isc->receive_pdu = NULL;
 		return (request);
 
 	default:
-		panic("invalid ic_receive_state %d\n", ic->ic_receive_state);
+		panic("invalid receive_state %d\n", isc->receive_state);
 	}
 
 	if (error != 0) {
 		/*
-		 * Don't free the PDU; it's pointed to by ic->ic_receive_pdu
+		 * Don't free the PDU; it's pointed to by isc->receive_pdu
 		 * and will get freed in icl_soft_conn_close().
 		 */
 		icl_conn_fail(ic);
@@ -767,44 +678,28 @@ icl_conn_receive_pdu(struct icl_conn *ic, size_t *availablep)
 }
 
 static void
-icl_conn_receive_pdus(struct icl_conn *ic, size_t available)
+icl_conn_receive_pdus(struct icl_soft_conn *isc, struct mbuf **r, size_t *rs)
 {
+	struct icl_conn *ic = &isc->ic;
 	struct icl_pdu *response;
-	struct socket *so;
-
-	so = ic->ic_socket;
-
-	/*
-	 * This can never happen; we're careful to only mess with ic->ic_socket
-	 * pointer when the send/receive threads are not running.
-	 */
-	KASSERT(so != NULL, ("NULL socket"));
 
 	for (;;) {
 		if (ic->ic_disconnecting)
 			return;
 
-		if (so->so_error != 0) {
-			ICL_DEBUG("connection error %d; "
-			    "dropping connection", so->so_error);
-			icl_conn_fail(ic);
-			return;
-		}
-
 		/*
 		 * Loop until we have a complete PDU or there is not enough
 		 * data in the socket buffer.
 		 */
-		if (available < ic->ic_receive_len) {
+		if (*rs < isc->receive_len) {
 #if 0
-			ICL_DEBUG("not enough data; have %zd, "
-			    "need %zd", available,
-			    ic->ic_receive_len);
+			ICL_DEBUG("not enough data; have %zd, need %zd",
+			    *rs, isc->receive_len);
 #endif
 			return;
 		}
 
-		response = icl_conn_receive_pdu(ic, &available);
+		response = icl_conn_receive_pdu(isc, r, rs);
 		if (response == NULL)
 			continue;
 
@@ -824,16 +719,20 @@ icl_conn_receive_pdus(struct icl_conn *ic, size_t available)
 static void
 icl_receive_thread(void *arg)
 {
-	struct icl_conn *ic;
-	size_t available;
+	struct icl_soft_conn *isc = arg;
+	struct icl_conn *ic = &isc->ic;
+	size_t available, read = 0;
 	struct socket *so;
+	struct mbuf *m, *r = NULL;
+	struct uio uio;
+	int error, flags;
 
-	ic = arg;
 	so = ic->ic_socket;
 
 	for (;;) {
+		SOCKBUF_LOCK(&so->so_rcv);
 		if (ic->ic_disconnecting) {
-			//ICL_DEBUG("terminating");
+			SOCKBUF_UNLOCK(&so->so_rcv);
 			break;
 		}
 
@@ -843,21 +742,53 @@ icl_receive_thread(void *arg)
 		 * to avoid unnecessary wakeups until there
 		 * is enough data received to read the PDU.
 		 */
-		SOCKBUF_LOCK(&so->so_rcv);
 		available = sbavail(&so->so_rcv);
-		if (available < ic->ic_receive_len) {
-			so->so_rcv.sb_lowat = ic->ic_receive_len;
-			cv_wait(&ic->ic_receive_cv, &so->so_rcv.sb_mtx);
-		} else
+		if (read + available < isc->receive_len) {
+			so->so_rcv.sb_lowat = isc->receive_len - read;
+			cv_wait(&isc->receive_cv, SOCKBUF_MTX(&so->so_rcv));
 			so->so_rcv.sb_lowat = so->so_rcv.sb_hiwat + 1;
+			available = sbavail(&so->so_rcv);
+		}
 		SOCKBUF_UNLOCK(&so->so_rcv);
 
-		icl_conn_receive_pdus(ic, available);
+		if (available == 0) {
+			if (so->so_error != 0) {
+				ICL_DEBUG("connection error %d; "
+				    "dropping connection", so->so_error);
+				icl_conn_fail(ic);
+				break;
+			}
+			continue;
+		}
+
+		memset(&uio, 0, sizeof(uio));
+		uio.uio_resid = available;
+		flags = MSG_DONTWAIT;
+		error = soreceive(so, NULL, &uio, &m, NULL, &flags);
+		if (error != 0) {
+			ICL_DEBUG("soreceive error %d", error);
+			break;
+		}
+		if (uio.uio_resid != 0) {
+			m_freem(m);
+			ICL_DEBUG("short read");
+			break;
+		}
+		if (r)
+			m_cat(r, m);
+		else
+			r = m;
+		read += available;
+
+		icl_conn_receive_pdus(isc, &r, &read);
 	}
 
+	if (r)
+		m_freem(r);
+
 	ICL_CONN_LOCK(ic);
-	ic->ic_receive_running = false;
-	cv_signal(&ic->ic_send_cv);
+	isc->receive_running = false;
+	cv_signal(&isc->send_cv);
 	ICL_CONN_UNLOCK(ic);
 	kthread_exit();
 }
@@ -865,13 +796,13 @@ icl_receive_thread(void *arg)
 static int
 icl_soupcall_receive(struct socket *so, void *arg, int waitflag)
 {
-	struct icl_conn *ic;
+	struct icl_soft_conn *isc;
 
 	if (!soreadable(so))
 		return (SU_OK);
 
-	ic = arg;
-	cv_signal(&ic->ic_receive_cv);
+	isc = arg;
+	cv_signal(&isc->receive_cv);
 	return (SU_OK);
 }
 
@@ -931,9 +862,11 @@ icl_pdu_finalize(struct icl_pdu *request)
 }
 
 static void
-icl_conn_send_pdus(struct icl_conn *ic, struct icl_pdu_stailq *queue)
+icl_conn_send_pdus(struct icl_soft_conn *isc, struct icl_pdu_stailq *queue)
 {
+	struct icl_conn *ic = &isc->ic;
 	struct icl_pdu *request, *request2;
+	struct mbuf *m;
 	struct socket *so;
 	long available, size, size2;
 	int coalesced, error;
@@ -950,6 +883,7 @@ icl_conn_send_pdus(struct icl_conn *ic, struct icl_pdu_stailq *queue)
 	 * of error.
 	 */
 	available = sbspace(&so->so_snd);
+	isc->check_send_space = false;
 
 	/*
 	 * Notify the socket upcall that we don't need wakeups
@@ -993,8 +927,8 @@ icl_conn_send_pdus(struct icl_conn *ic, struct icl_pdu_stailq *queue)
 			return;
 		}
 		if (coalesce) {
-			coalesced = 1;
-			for (;;) {
+			m = request->ip_bhs_mbuf;
+			for (coalesced = 1; ; coalesced++) {
 				request2 = STAILQ_FIRST(queue);
 				if (request2 == NULL)
 					break;
@@ -1011,13 +945,13 @@ icl_conn_send_pdus(struct icl_conn *ic, struct icl_pdu_stailq *queue)
 					icl_conn_fail(ic);
 					return;
 				}
-				m_cat(request->ip_bhs_mbuf, request2->ip_bhs_mbuf);
+				while (m->m_next)
+					m = m->m_next;
+				m_cat(m, request2->ip_bhs_mbuf);
 				request2->ip_bhs_mbuf = NULL;
 				request->ip_bhs_mbuf->m_pkthdr.len += size2;
 				size += size2;
-				STAILQ_REMOVE_AFTER(queue, request, ip_next);
 				icl_soft_pdu_done(request2, 0);
-				coalesced++;
 			}
 #if 0
 			if (coalesced > 1) {
@@ -1044,10 +978,12 @@ icl_conn_send_pdus(struct icl_conn *ic, struct icl_pdu_stailq *queue)
 static void
 icl_send_thread(void *arg)
 {
+	struct icl_soft_conn *isc;
 	struct icl_conn *ic;
 	struct icl_pdu_stailq queue;
 
-	ic = arg;
+	isc = arg;
+	ic = &isc->ic;
 
 	STAILQ_INIT(&queue);
 
@@ -1055,24 +991,22 @@ icl_send_thread(void *arg)
 	for (;;) {
 		for (;;) {
 			/*
-			 * If the local queue is empty, populate it from
-			 * the main one.  This way the icl_conn_send_pdus()
-			 * can go through all the queued PDUs without holding
-			 * any locks.
+			 * Populate the local queue from the main one.
+			 * This way the icl_conn_send_pdus() can go through
+			 * all the queued PDUs without holding any locks.
 			 */
-			if (STAILQ_EMPTY(&queue))
-				STAILQ_SWAP(&ic->ic_to_send, &queue, icl_pdu);
+			if (STAILQ_EMPTY(&queue) || isc->check_send_space)
+				STAILQ_CONCAT(&queue, &isc->to_send);
 
-			ic->ic_check_send_space = false;
 			ICL_CONN_UNLOCK(ic);
-			icl_conn_send_pdus(ic, &queue);
+			icl_conn_send_pdus(isc, &queue);
 			ICL_CONN_LOCK(ic);
 
 			/*
 			 * The icl_soupcall_send() was called since the last
 			 * call to sbspace(); go around;
 			 */
-			if (ic->ic_check_send_space)
+			if (isc->check_send_space)
 				continue;
 
 			/*
@@ -1080,7 +1014,7 @@ icl_send_thread(void *arg)
 			 * in the main one; go around.
 			 */
 			if (STAILQ_EMPTY(&queue) &&
-			    !STAILQ_EMPTY(&ic->ic_to_send))
+			    !STAILQ_EMPTY(&isc->to_send))
 				continue;
 
 			/*
@@ -1096,17 +1030,17 @@ icl_send_thread(void *arg)
 			break;
 		}
 
-		cv_wait(&ic->ic_send_cv, ic->ic_lock);
+		cv_wait(&isc->send_cv, ic->ic_lock);
 	}
 
 	/*
 	 * We're exiting; move PDUs back to the main queue, so they can
 	 * get freed properly.  At this point ordering doesn't matter.
 	 */
-	STAILQ_CONCAT(&ic->ic_to_send, &queue);
+	STAILQ_CONCAT(&isc->to_send, &queue);
 
-	ic->ic_send_running = false;
-	cv_signal(&ic->ic_send_cv);
+	isc->send_running = false;
+	cv_signal(&isc->send_cv);
 	ICL_CONN_UNLOCK(ic);
 	kthread_exit();
 }
@@ -1114,18 +1048,20 @@ icl_send_thread(void *arg)
 static int
 icl_soupcall_send(struct socket *so, void *arg, int waitflag)
 {
+	struct icl_soft_conn *isc;
 	struct icl_conn *ic;
 
 	if (!sowriteable(so))
 		return (SU_OK);
 
-	ic = arg;
+	isc = arg;
+	ic = &isc->ic;
 
 	ICL_CONN_LOCK(ic);
-	ic->ic_check_send_space = true;
+	isc->check_send_space = true;
 	ICL_CONN_UNLOCK(ic);
 
-	cv_signal(&ic->ic_send_cv);
+	cv_signal(&isc->send_cv);
 
 	return (SU_OK);
 }
@@ -1197,6 +1133,7 @@ static void
 icl_soft_conn_pdu_queue_cb(struct icl_conn *ic, struct icl_pdu *ip,
     icl_pdu_cb cb)
 {
+	struct icl_soft_conn *isc = (struct icl_soft_conn *)ic;
 	struct icl_soft_pdu *isp = (struct icl_soft_pdu *)ip;
 
 	ICL_CONN_LOCK_ASSERT(ic);
@@ -1209,8 +1146,8 @@ icl_soft_conn_pdu_queue_cb(struct icl_conn *ic, struct icl_pdu *ip,
 		return;
 	}
 
-	if (!STAILQ_EMPTY(&ic->ic_to_send)) {
-		STAILQ_INSERT_TAIL(&ic->ic_to_send, ip, ip_next);
+	if (!STAILQ_EMPTY(&isc->to_send)) {
+		STAILQ_INSERT_TAIL(&isc->to_send, ip, ip_next);
 		/*
 		 * If the queue is not empty, someone else had already
 		 * signaled the send thread; no need to do that again,
@@ -1219,27 +1156,30 @@ icl_soft_conn_pdu_queue_cb(struct icl_conn *ic, struct icl_pdu *ip,
 		return;
 	}
 
-	STAILQ_INSERT_TAIL(&ic->ic_to_send, ip, ip_next);
-	cv_signal(&ic->ic_send_cv);
+	STAILQ_INSERT_TAIL(&isc->to_send, ip, ip_next);
+	cv_signal(&isc->send_cv);
 }
 
 static struct icl_conn *
 icl_soft_new_conn(const char *name, struct mtx *lock)
 {
+	struct icl_soft_conn *isc;
 	struct icl_conn *ic;
 
 	refcount_acquire(&icl_ncons);
 
-	ic = (struct icl_conn *)kobj_create(&icl_soft_class, M_ICL_SOFT, M_WAITOK | M_ZERO);
+	isc = (struct icl_soft_conn *)kobj_create(&icl_soft_class, M_ICL_SOFT,
+	    M_WAITOK | M_ZERO);
 
-	STAILQ_INIT(&ic->ic_to_send);
+	STAILQ_INIT(&isc->to_send);
+	cv_init(&isc->send_cv, "icl_tx");
+	cv_init(&isc->receive_cv, "icl_rx");
+
+	ic = &isc->ic;
 	ic->ic_lock = lock;
-	cv_init(&ic->ic_send_cv, "icl_tx");
-	cv_init(&ic->ic_receive_cv, "icl_rx");
 #ifdef DIAGNOSTIC
 	refcount_init(&ic->ic_outstanding_pdus, 0);
 #endif
-	ic->ic_max_data_segment_length = max_data_segment_length;
 	ic->ic_name = name;
 	ic->ic_offload = "None";
 	ic->ic_unmapped = false;
@@ -1250,21 +1190,23 @@ icl_soft_new_conn(const char *name, struct mtx *lock)
 void
 icl_soft_conn_free(struct icl_conn *ic)
 {
+	struct icl_soft_conn *isc = (struct icl_soft_conn *)ic;
 
 #ifdef DIAGNOSTIC
 	KASSERT(ic->ic_outstanding_pdus == 0,
 	    ("destroying session with %d outstanding PDUs",
 	     ic->ic_outstanding_pdus));
 #endif
-	cv_destroy(&ic->ic_send_cv);
-	cv_destroy(&ic->ic_receive_cv);
-	kobj_delete((struct kobj *)ic, M_ICL_SOFT);
+	cv_destroy(&isc->send_cv);
+	cv_destroy(&isc->receive_cv);
+	kobj_delete((struct kobj *)isc, M_ICL_SOFT);
 	refcount_release(&icl_ncons);
 }
 
 static int
 icl_conn_start(struct icl_conn *ic)
 {
+	struct icl_soft_conn *isc = (struct icl_soft_conn *)ic;
 	size_t minspace;
 	struct sockopt opt;
 	int error, one = 1;
@@ -1279,8 +1221,8 @@ icl_conn_start(struct icl_conn *ic)
 		return (EINVAL);
 	}
 
-	ic->ic_receive_state = ICL_CONN_STATE_BHS;
-	ic->ic_receive_len = sizeof(struct iscsi_bhs);
+	isc->receive_state = ICL_CONN_STATE_BHS;
+	isc->receive_len = sizeof(struct iscsi_bhs);
 	ic->ic_disconnecting = false;
 
 	ICL_CONN_UNLOCK(ic);
@@ -1290,13 +1232,17 @@ icl_conn_start(struct icl_conn *ic)
 	 * send a PDU in pieces; thus, the minimum buffer size is equal
 	 * to the maximum PDU size.  "+4" is to account for possible padding.
 	 */
-	minspace = sizeof(struct iscsi_bhs) + ic->ic_max_data_segment_length +
+	minspace = sizeof(struct iscsi_bhs) +
+	    ic->ic_max_send_data_segment_length +
 	    ISCSI_HEADER_DIGEST_SIZE + ISCSI_DATA_DIGEST_SIZE + 4;
 	if (sendspace < minspace) {
 		ICL_WARN("kern.icl.sendspace too low; must be at least %zd",
 		    minspace);
 		sendspace = minspace;
 	}
+	minspace = sizeof(struct iscsi_bhs) +
+	    ic->ic_max_recv_data_segment_length +
+	    ISCSI_HEADER_DIGEST_SIZE + ISCSI_DATA_DIGEST_SIZE + 4;
 	if (recvspace < minspace) {
 		ICL_WARN("kern.icl.recvspace too low; must be at least %zd",
 		    minspace);
@@ -1333,25 +1279,25 @@ icl_conn_start(struct icl_conn *ic)
 	 * and free space to send outgoing ones.
 	 */
 	SOCKBUF_LOCK(&ic->ic_socket->so_snd);
-	soupcall_set(ic->ic_socket, SO_SND, icl_soupcall_send, ic);
+	soupcall_set(ic->ic_socket, SO_SND, icl_soupcall_send, isc);
 	SOCKBUF_UNLOCK(&ic->ic_socket->so_snd);
 	SOCKBUF_LOCK(&ic->ic_socket->so_rcv);
-	soupcall_set(ic->ic_socket, SO_RCV, icl_soupcall_receive, ic);
+	soupcall_set(ic->ic_socket, SO_RCV, icl_soupcall_receive, isc);
 	SOCKBUF_UNLOCK(&ic->ic_socket->so_rcv);
 
 	/*
 	 * Start threads.
 	 */
 	ICL_CONN_LOCK(ic);
-	ic->ic_send_running = ic->ic_receive_running = true;
+	isc->send_running = isc->receive_running = true;
 	ICL_CONN_UNLOCK(ic);
 	error = kthread_add(icl_send_thread, ic, NULL, NULL, 0, 0, "%stx",
 	    ic->ic_name);
 	if (error != 0) {
 		ICL_WARN("kthread_add(9) failed with error %d", error);
 		ICL_CONN_LOCK(ic);
-		ic->ic_send_running = ic->ic_receive_running = false;
-		cv_signal(&ic->ic_send_cv);
+		isc->send_running = isc->receive_running = false;
+		cv_signal(&isc->send_cv);
 		ICL_CONN_UNLOCK(ic);
 		icl_soft_conn_close(ic);
 		return (error);
@@ -1361,8 +1307,8 @@ icl_conn_start(struct icl_conn *ic)
 	if (error != 0) {
 		ICL_WARN("kthread_add(9) failed with error %d", error);
 		ICL_CONN_LOCK(ic);
-		ic->ic_receive_running = false;
-		cv_signal(&ic->ic_send_cv);
+		isc->receive_running = false;
+		cv_signal(&isc->send_cv);
 		ICL_CONN_UNLOCK(ic);
 		icl_soft_conn_close(ic);
 		return (error);
@@ -1437,19 +1383,27 @@ icl_soft_conn_handoff(struct icl_conn *ic, int fd)
 void
 icl_soft_conn_close(struct icl_conn *ic)
 {
+	struct icl_soft_conn *isc = (struct icl_soft_conn *)ic;
 	struct icl_pdu *pdu;
 	struct socket *so;
 
-	ICL_CONN_LOCK(ic);
-
 	/*
 	 * Wake up the threads, so they can properly terminate.
+	 * Receive thread sleeps on so->so_rcv lock, send on ic->ic_lock.
 	 */
-	ic->ic_disconnecting = true;
-	while (ic->ic_receive_running || ic->ic_send_running) {
-		cv_signal(&ic->ic_receive_cv);
-		cv_signal(&ic->ic_send_cv);
-		cv_wait(&ic->ic_send_cv, ic->ic_lock);
+	ICL_CONN_LOCK(ic);
+	if (!ic->ic_disconnecting) {
+		so = ic->ic_socket;
+		if (so)
+			SOCKBUF_LOCK(&so->so_rcv);
+		ic->ic_disconnecting = true;
+		if (so)
+			SOCKBUF_UNLOCK(&so->so_rcv);
+	}
+	while (isc->receive_running || isc->send_running) {
+		cv_signal(&isc->receive_cv);
+		cv_signal(&isc->send_cv);
+		cv_wait(&isc->send_cv, ic->ic_lock);
 	}
 
 	/* Some other thread could close the connection same time. */
@@ -1475,22 +1429,22 @@ icl_soft_conn_close(struct icl_conn *ic)
 	soclose(so);
 	ICL_CONN_LOCK(ic);
 
-	if (ic->ic_receive_pdu != NULL) {
+	if (isc->receive_pdu != NULL) {
 		//ICL_DEBUG("freeing partially received PDU");
-		icl_soft_conn_pdu_free(ic, ic->ic_receive_pdu);
-		ic->ic_receive_pdu = NULL;
+		icl_soft_conn_pdu_free(ic, isc->receive_pdu);
+		isc->receive_pdu = NULL;
 	}
 
 	/*
 	 * Remove any outstanding PDUs from the send queue.
 	 */
-	while (!STAILQ_EMPTY(&ic->ic_to_send)) {
-		pdu = STAILQ_FIRST(&ic->ic_to_send);
-		STAILQ_REMOVE_HEAD(&ic->ic_to_send, ip_next);
+	while (!STAILQ_EMPTY(&isc->to_send)) {
+		pdu = STAILQ_FIRST(&isc->to_send);
+		STAILQ_REMOVE_HEAD(&isc->to_send, ip_next);
 		icl_soft_pdu_done(pdu, ENOTCONN);
 	}
 
-	KASSERT(STAILQ_EMPTY(&ic->ic_to_send),
+	KASSERT(STAILQ_EMPTY(&isc->to_send),
 	    ("destroying session with non-empty send queue"));
 	ICL_CONN_UNLOCK(ic);
 }

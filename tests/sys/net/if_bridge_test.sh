@@ -117,9 +117,92 @@ stp_body()
 	then
 		atf_fail "STP failed to detect bridging loop"
 	fi
+
+	# We must also have at least some forwarding interfaces
+	a_forwarding=$(jexec a ifconfig ${bridge_a} | grep forwarding)
+	b_forwarding=$(jexec b ifconfig ${bridge_b} | grep forwarding)
+
+	if [ -z "${a_forwarding}" ] && [ -z "${b_forwarding}" ]
+	then
+		atf_fail "STP failed to detect bridging loop"
+	fi
 }
 
 stp_cleanup()
+{
+	vnet_cleanup
+}
+
+atf_test_case "stp_vlan" "cleanup"
+stp_vlan_head()
+{
+	atf_set descr 'Spanning tree on VLAN test'
+	atf_set require.user root
+}
+
+stp_vlan_body()
+{
+	vnet_init
+
+	epair_one=$(vnet_mkepair)
+	epair_two=$(vnet_mkepair)
+	bridge_a=$(vnet_mkbridge)
+	bridge_b=$(vnet_mkbridge)
+
+	vnet_mkjail a ${bridge_a} ${epair_one}a ${epair_two}a
+	vnet_mkjail b ${bridge_b} ${epair_one}b ${epair_two}b
+
+	jexec a ifconfig ${epair_one}a up
+	jexec a ifconfig ${epair_two}a up
+	vlan_a_one=$(jexec a ifconfig vlan create vlandev ${epair_one}a vlan 42)
+	vlan_a_two=$(jexec a ifconfig vlan create vlandev ${epair_two}a vlan 42)
+	jexec a ifconfig ${vlan_a_one} up
+	jexec a ifconfig ${vlan_a_two} up
+	jexec a ifconfig ${bridge_a} addm ${vlan_a_one}
+	jexec a ifconfig ${bridge_a} addm ${vlan_a_two}
+
+	jexec b ifconfig ${epair_one}b up
+	jexec b ifconfig ${epair_two}b up
+	vlan_b_one=$(jexec b ifconfig vlan create vlandev ${epair_one}b vlan 42)
+	vlan_b_two=$(jexec b ifconfig vlan create vlandev ${epair_two}b vlan 42)
+	jexec b ifconfig ${vlan_b_one} up
+	jexec b ifconfig ${vlan_b_two} up
+	jexec b ifconfig ${bridge_b} addm ${vlan_b_one}
+	jexec b ifconfig ${bridge_b} addm ${vlan_b_two}
+
+	jexec a ifconfig ${bridge_a} 192.0.2.1/24
+
+	# Enable spanning tree
+	jexec a ifconfig ${bridge_a} stp ${vlan_a_one}
+	jexec a ifconfig ${bridge_a} stp ${vlan_a_two}
+	jexec b ifconfig ${bridge_b} stp ${vlan_b_one}
+	jexec b ifconfig ${bridge_b} stp ${vlan_b_two}
+
+	jexec b ifconfig ${bridge_b} up
+	jexec a ifconfig ${bridge_a} up
+
+	# Give STP time to do its thing
+	sleep 5
+
+	a_discard=$(jexec a ifconfig ${bridge_a} | grep discarding)
+	b_discard=$(jexec b ifconfig ${bridge_b} | grep discarding)
+
+	if [ -z "${a_discard}" ] && [ -z "${b_discard}" ]
+	then
+		atf_fail "STP failed to detect bridging loop"
+	fi
+
+	# We must also have at least some forwarding interfaces
+	a_forwarding=$(jexec a ifconfig ${bridge_a} | grep forwarding)
+	b_forwarding=$(jexec b ifconfig ${bridge_b} | grep forwarding)
+
+	if [ -z "${a_forwarding}" ] && [ -z "${b_forwarding}" ]
+	then
+		atf_fail "STP failed to detect bridging loop"
+	fi
+}
+
+stp_vlan_cleanup()
 {
 	vnet_cleanup
 }
@@ -325,13 +408,125 @@ inherit_mac_cleanup()
 	vnet_cleanup
 }
 
+atf_test_case "stp_validation" "cleanup"
+stp_validation_head()
+{
+	atf_set descr 'Check STP validation'
+	atf_set require.user root
+	atf_set require.progs scapy
+}
+
+stp_validation_body()
+{
+	vnet_init
+
+	epair_one=$(vnet_mkepair)
+	epair_two=$(vnet_mkepair)
+	bridge=$(vnet_mkbridge)
+
+	ifconfig ${bridge} up
+	ifconfig ${bridge} addm ${epair_one}a addm ${epair_two}a
+	ifconfig ${bridge} stp ${epair_one}a stp ${epair_two}a
+
+	ifconfig ${epair_one}a up
+	ifconfig ${epair_one}b up
+	ifconfig ${epair_two}a up
+	ifconfig ${epair_two}b up
+
+	# Wait until the interfaces are no longer discarding
+	while ifconfig ${bridge} | grep 'state discarding' >/dev/null
+	do
+		sleep 1
+	done
+
+	# Now inject invalid STP BPDUs on epair_one and see if they're repeated
+	# on epair_two
+	atf_check -s exit:0 \
+	    $(atf_get_srcdir)/stp.py \
+	    --sendif ${epair_one}b \
+	    --recvif ${epair_two}b
+}
+
+stp_validation_cleanup()
+{
+	vnet_cleanup
+}
+
+atf_test_case "gif" "cleanup"
+gif_head()
+{
+	atf_set descr 'gif as a bridge member'
+	atf_set require.user root
+}
+
+gif_body()
+{
+	vnet_init
+
+	epair=$(vnet_mkepair)
+
+	vnet_mkjail one ${epair}a
+	vnet_mkjail two ${epair}b
+
+	jexec one sysctl net.link.gif.max_nesting=2
+	jexec two sysctl net.link.gif.max_nesting=2
+
+	jexec one ifconfig ${epair}a 192.0.2.1/24 up
+	jexec two ifconfig ${epair}b 192.0.2.2/24 up
+
+	# Tunnel
+	gif_one=$(jexec one ifconfig gif create)
+	gif_two=$(jexec two ifconfig gif create)
+
+	jexec one ifconfig ${gif_one} tunnel 192.0.2.1 192.0.2.2
+	jexec one ifconfig ${gif_one} up
+	jexec two ifconfig ${gif_two} tunnel 192.0.2.2 192.0.2.1
+	jexec two ifconfig ${gif_two} up
+
+	bridge_one=$(jexec one ifconfig bridge create)
+	bridge_two=$(jexec two ifconfig bridge create)
+	jexec one ifconfig ${bridge_one} 198.51.100.1/24 up
+	jexec one ifconfig ${bridge_one} addm ${gif_one}
+	jexec two ifconfig ${bridge_two} 198.51.100.2/24 up
+	jexec two ifconfig ${bridge_two} addm ${gif_two}
+
+	# Sanity check
+	atf_check -s exit:0 -o ignore \
+		jexec one ping -c 1 192.0.2.2
+
+	# Test tunnel
+	atf_check -s exit:0 -o ignore \
+		jexec one ping -c 1 198.51.100.2
+	atf_check -s exit:0 -o ignore \
+		jexec one ping -c 1 -s 1200 198.51.100.2
+	atf_check -s exit:0 -o ignore \
+		jexec one ping -c 1 -s 2000 198.51.100.2
+
+	# Higher MTU on the tunnel than on the underlying interface
+	jexec one ifconfig ${epair}a mtu 1000
+	jexec two ifconfig ${epair}b mtu 1000
+
+	atf_check -s exit:0 -o ignore \
+		jexec one ping -c 1 -s 1200 198.51.100.2
+	atf_check -s exit:0 -o ignore \
+		jexec one ping -c 1 -s 2000 198.51.100.2
+}
+
+gif_cleanup()
+{
+	vnet_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "bridge_transmit_ipv4_unicast"
 	atf_add_test_case "stp"
+	atf_add_test_case "stp_vlan"
 	atf_add_test_case "static"
 	atf_add_test_case "span"
 	atf_add_test_case "inherit_mac"
 	atf_add_test_case "delete_with_members"
 	atf_add_test_case "mac_conflict"
+	atf_add_test_case "stp_validation"
+	atf_add_test_case "gif"
 }

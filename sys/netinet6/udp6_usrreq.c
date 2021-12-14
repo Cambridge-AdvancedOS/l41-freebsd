@@ -197,7 +197,7 @@ udp6_append(struct inpcb *inp, struct mbuf *n, int off,
 	SOCKBUF_LOCK(&so->so_rcv);
 	if (sbappendaddr_locked(&so->so_rcv, (struct sockaddr *)&fromsa[0], n,
 	    opts) == 0) {
-		SOCKBUF_UNLOCK(&so->so_rcv);
+		soroverflow_locked(so);
 		m_freem(n);
 		if (opts)
 			m_freem(opts);
@@ -1091,6 +1091,11 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct thread *td)
 	inp = sotoinpcb(so);
 	KASSERT(inp != NULL, ("udp6_bind: inp == NULL"));
 
+	if (nam->sa_family != AF_INET6)
+		return (EAFNOSUPPORT);
+	if (nam->sa_len != sizeof(struct sockaddr_in6))
+		return (EINVAL);
+
 	INP_WLOCK(inp);
 	INP_HASH_WLOCK(pcbinfo);
 	vflagsav = inp->inp_vflag;
@@ -1176,8 +1181,13 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct thread *td)
 
 	pcbinfo = udp_get_inpcbinfo(so->so_proto->pr_protocol);
 	inp = sotoinpcb(so);
-	sin6 = (struct sockaddr_in6 *)nam;
 	KASSERT(inp != NULL, ("udp6_connect: inp == NULL"));
+
+	sin6 = (struct sockaddr_in6 *)nam;
+	if (sin6->sin6_family != AF_INET6)
+		return (EAFNOSUPPORT);
+	if (sin6->sin6_len != sizeof(*sin6))
+		return (EINVAL);
 
 	/*
 	 * XXXRW: Need to clarify locking of v4/v6 flags.

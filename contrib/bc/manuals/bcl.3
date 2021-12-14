@@ -25,7 +25,7 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.TH "BCL" "3" "January 2021" "Gavin D. Howard" "Libraries Manual"
+.TH "BCL" "3" "June 2021" "Gavin D. Howard" "Libraries Manual"
 .SH NAME
 .PP
 bcl - library of arbitrary precision decimal arithmetic
@@ -54,6 +54,11 @@ These items allow clients to set up bcl(3).
 \f[B]bool bcl_abortOnFatalError(\f[R]\f[I]void\f[R]\f[B]);\f[R]
 .PP
 \f[B]void bcl_setAbortOnFatalError(bool\f[R] \f[I]abrt\f[R]\f[B]);\f[R]
+.PP
+\f[B]bool bcl_leadingZeroes(\f[R]\f[I]void\f[R]\f[B]);\f[R]
+.PP
+\f[B]void bcl_setLeadingZeroes(bool\f[R]
+\f[I]leadingZeroes\f[R]\f[B]);\f[R]
 .PP
 \f[B]void bcl_gc(\f[R]\f[I]void\f[R]\f[B]);\f[R]
 .SS Contexts
@@ -210,7 +215,7 @@ generator in bcl(3).
 \f[I]n\f[R]\f[B]);\f[R]
 .PP
 \f[B]BclError bcl_rand_seed(unsigned char\f[R]
-\f[I]seed\f[R]\f[B][\f[R]\f[I]BC_SEED_SIZE\f[R]\f[B]]);\f[R]
+\f[I]seed\f[R]\f[B][\f[R]\f[I]BCL_SEED_SIZE\f[R]\f[B]]);\f[R]
 .PP
 \f[B]void bcl_rand_reseed(\f[R]\f[I]void\f[R]\f[B]);\f[R]
 .PP
@@ -230,6 +235,10 @@ in bc(1).
 bcl(3) is async-signal-safe if
 \f[B]bcl_handleSignal(\f[R]\f[I]void\f[R]\f[B])\f[R] is used properly.
 (See the \f[B]SIGNAL HANDLING\f[R] section.)
+.PP
+bcl(3) assumes that it is allowed to use the \f[B]bcl\f[R],
+\f[B]Bcl\f[R], \f[B]bc\f[R], and \f[B]Bc\f[R] prefixes for symbol names
+without collision.
 .PP
 All of the items in its interface are described below.
 See the documentation for each function for what each function can
@@ -301,6 +310,8 @@ a fatal error occurs.
 .RS
 .PP
 If activated, clients do not need to check for fatal errors.
+.PP
+The default is \f[B]false\f[R].
 .RE
 .TP
 \f[B]void bcl_setAbortOnFatalError(bool\f[R] \f[I]abrt\f[R]\f[B])\f[R]
@@ -313,6 +324,23 @@ If \f[I]abrt\f[R] is \f[B]true\f[R], bcl(3) will cause a
 .PP
 If activated, clients do not need to check for fatal errors.
 .RE
+.TP
+\f[B]bool bcl_leadingZeroes(\f[R]\f[I]void\f[R]\f[B])\f[R]
+Queries and returns the state of whether leading zeroes are added to
+strings returned by \f[B]bcl_string()\f[R] when numbers are greater than
+\f[B]-1\f[R], less than \f[B]1\f[R], and not equal to \f[B]0\f[R].
+If \f[B]true\f[R] is returned, then leading zeroes will be added.
+.RS
+.PP
+The default is \f[B]false\f[R].
+.RE
+.TP
+\f[B]void bcl_setLeadingZeroes(bool\f[R] \f[I]leadingZeroes\f[R]\f[B])\f[R]
+Sets the state of whether leading zeroes are added to strings returned
+by \f[B]bcl_string()\f[R] when numbers are greater than \f[B]-1\f[R],
+less than \f[B]1\f[R], and not equal to \f[B]0\f[R].
+If \f[I]leadingZeroes\f[R] is \f[B]true\f[R], leading zeroes will be
+added to strings returned by \f[B]bcl_string()\f[R].
 .TP
 \f[B]void bcl_gc(\f[R]\f[I]void\f[R]\f[B])\f[R]
 Garbage collects cached instances of arbitrary-precision numbers.
@@ -952,7 +980,8 @@ functions:
 .IP \[bu] 2
 \f[B]bcl_rand_seedWithNum(BclNumber)\f[R]
 .IP \[bu] 2
-\f[B]bcl_rand_seed(unsigned char[BC_SEED_SIZE])\f[R]
+\f[B]bcl_rand_seed(unsigned
+char[\f[R]\f[I]BCL_SEED_SIZE\f[R]\f[B]])\f[R]
 .IP \[bu] 2
 \f[B]bcl_rand_reseed(\f[R]\f[I]void\f[R]\f[B])\f[R]
 .PP
@@ -1075,7 +1104,7 @@ function, they are not guaranteed to return a number equal to
 \f[I]n\f[R].
 .RE
 .TP
-\f[B]BclError bcl_rand_seed(unsigned char\f[R] \f[I]seed\f[R]\f[B][\f[R]\f[I]BC_SEED_SIZE\f[R]\f[B]])\f[R]
+\f[B]BclError bcl_rand_seed(unsigned char\f[R] \f[I]seed\f[R]\f[B][\f[R]\f[I]BCL_SEED_SIZE\f[R]\f[B]])\f[R]
 Seeds the PRNG with the bytes in \f[I]seed\f[R].
 .RS
 .PP

@@ -1,5 +1,205 @@
 # News
 
+## 5.1.1
+
+This is a production release that completes a bug fix from `5.1.0`. The bug
+exists in all versions of `bc`.
+
+The bug was that `if` statements without `else` statements would not be handled
+correctly at the end of files or right before a function definition.
+
+## 5.1.0
+
+This is a production release with some fixes and new features.
+
+* Fixed a bug where an `if` statement without an `else` before defining a
+  function caused an error.
+* Fixed a bug with the `bc` banner and `-q`.
+* Fixed a bug on Windows where files were not read correctly.
+* Added a command-line flag (`-z`) to make `bc` and `dc` print leading zeroes on
+  numbers `-1 < x < 1`.
+* Added four functions to `lib2.bc` (`plz()`, `plznl()`, `pnlz()`, and
+  `pnlznl()`) to allow printing numbers with or without leading zeros, despite
+  the use of `-z` or not.
+* Added builtin functions to query global state like line length, global stacks,
+  and leading zeroes.
+* Added a command-line flag (`-L`) to disable wrapping when printing numbers.
+* Improved builds on Windows.
+
+## 5.0.2
+
+This is a production release with one fix for a flaky test. If you have not
+experienced problems with the test suite, you do ***NOT*** need to upgrade.
+
+The test was one that tested whether `bc` fails gracefully when it can't
+allocate memory. Unfortunately, there are cases when Linux and FreeBSD lie and
+pretend to allocate the memory.
+
+The reason they do this is because a lot of programs don't use all of the memory
+they allocate, so those OS's usually get away with it.
+
+However, this `bc` uses all of the memory it allocates (at least at page
+granularity), so when it tries to use the memory, FreeBSD and Linux kill it.
+
+This only happens sometimes, however. Other times (on my machine), they do, in
+fact, refuse the request.
+
+So I changed the test to not test for that because I think the graceful failure
+code won't really change much.
+
+## 5.0.1
+
+This is a production release with two fixes:
+
+* Fix for the build on Mac OSX.
+* Fix for the build on Android.
+
+Users that do not use those platforms do ***NOT*** need to update.
+
+## 5.0.0
+
+This is a major production release with several changes:
+
+* Added support for OpenBSD's `pledge()` and `unveil()`.
+* Fixed print bug where a backslash newline combo was printed even if only one
+  digit was left, something I blindly copied from GNU `bc`, like a fool.
+* Fixed bugs in the manuals.
+* Fixed a possible multiplication overflow in power.
+* Temporary numbers are garbage collected if allocation fails, and the
+  allocation is retried. This is to make `bc` and `dc` more resilient to running
+  out of memory.
+* Limited the number of temporary numbers and made the space for them static so
+  that allocating more space for them cannot fail.
+* Allowed integers with non-zero `scale` to be used with power, places, and
+  shift operators.
+* Added greatest common divisor and least common multiple to `lib2.bc`.
+* Added `SIGQUIT` handling to history.
+* Added a command to `dc` (`y`) to get the length of register stacks.
+* Fixed multi-digit bugs in `lib2.bc`.
+* Removed the no prompt build option.
+* Created settings that builders can set defaults for and users can set their
+  preferences for. This includes the `bc` banner, resetting on `SIGINT`, TTY
+  mode, and prompt.
+* Added history support to Windows.
+* Fixed bugs with the handling of register names in `dc`.
+* Fixed bugs with multi-line comments and strings in both calculators.
+* Added a new error type and message for `dc` when register stacks don't have
+  enough items.
+* Optimized string allocation.
+* Made `bc` and `dc` UTF-8 capable.
+* Fixed a bug with `void` functions.
+* Fixed a misspelled symbol in `bcl`. This is technically a breaking change,
+  which requires this to be `5.0.0`.
+* Added the ability for users to get the copyright banner back.
+* Added the ability for users to have `bc` and `dc` quit on `SIGINT`.
+* Added the ability for users to disable prompt and TTY mode by environment
+  variables.
+* Added the ability for users to redefine keywords. This is another reason this
+  is `5.0.0`.
+* Added `dc`'s modular exponentiation and divmod to `bc`.
+* Added the ability to assign strings to variables and array elements and pass
+  them to functions in `bc`.
+* Added `dc`'s asciify command and stream printing to `bc`.
+* Added a command to `dc` (`Y`) to get the length of an array.
+* Added a command to `dc` (`,`) to get the depth of the execution stack.
+* Added bitwise and, or, xor, left shift, right shift, reverse, left rotate,
+  right rotate, and mod functions to `lib2.bc`.
+* Added the functions `s2u(x)` and `s2un(x,n)`, to `lib2.bc`.
+
+## 4.0.2
+
+This is a production release that fixes two bugs:
+
+1.	If no files are used and the first statement on `stdin` is invalid, `scale`
+	would not be set to `20` even if `-l` was used.
+2.	When using history, `bc` failed to respond properly to `SIGSTOP` and
+	`SIGTSTP`.
+
+## 4.0.1
+
+This is a production release that only adds one thing: flushing output when it
+is printed with a print statement.
+
+## 4.0.0
+
+This is a production release with many fixes, a new command-line option, and a
+big surprise:
+
+* A bug was fixed in `dc`'s `P` command where the item on the stack was *not*
+  popped.
+* Various bugs in the manuals have been fixed.
+* A known bug was fixed where history did not interact well with prompts printed
+  by user code without newlines.
+* A new command-line option, `-R` and `--no-read-prompt` was added to disable
+  just the prompt when using `read()` (`bc`) or `?` (`dc`).
+* And finally, **official support for Windows was added**.
+
+The last item is why this is a major version bump.
+
+Currently, only one set of build options (extra math and prompt enabled, history
+and NLS/locale support disabled, both calculators enabled) is supported on
+Windows. However, both debug and release builds are supported.
+
+In addition, Windows builds are supported for the the library (`bcl`).
+
+For more details about how to build on Windows, see the [README][5] or the
+[build manual][13].
+
+## 3.3.4
+
+This is a production release that fixes a small bug.
+
+The bug was that output was not flushed before a `read()` call, so prompts
+without a newline on the end were not flushed before the `read()` call.
+
+This is such a tiny bug that users only need to upgrade if they are affected.
+
+## 3.3.3
+
+This is a production release with one tweak and fixes for manuals.
+
+The tweak is that `length(0)` returns `1` instead of `0`. In `3.3.1`, I changed
+it so `length(0.x)`, where `x` could be any number of digits, returned the
+`scale`, but `length(0)` still returned `0` because I believe that `0` has `0`
+significant digits.
+
+After request of FreeBSD and considering the arguments of a mathematician,
+compatibility with other `bc`'s, and the expectations of users, I decided to
+make the change.
+
+The fixes for manuals fixed a bug where `--` was rendered as `-`.
+
+## 3.3.2
+
+This is a production release that fixes a divide-by-zero bug in `root()` in the
+[extended math library][16]. All previous versions with `root()` have the bug.
+
+## 3.3.1
+
+This is a production release that fixes a bug.
+
+The bug was in the reporting of number length when the value was 0.
+
+## 3.3.0
+
+This is a production release that changes one behavior and fixes documentation
+bugs.
+
+The changed behavior is the treatment of `-e` and `-f` when given through
+`BC_ENV_ARGS` or `DC_ENV_ARGS`. Now `bc` and `dc` do not exit when those options
+(or their equivalents) are given through those environment variables. However,
+`bc` and `dc` still exit when they or their equivalents are given on the
+command-line.
+
+## 3.2.7
+
+This is a production release that removes a small non-portable shell operation
+in `configure.sh`. This problem was only noticed on OpenBSD, not FreeBSD or
+Linux.
+
+Non-OpenBSD users do ***NOT*** need to upgrade, although NetBSD users may also
+need to upgrade.
+
 ## 3.2.6
 
 This is a production release that fixes the build on FreeBSD.
@@ -216,8 +416,8 @@ running tests during install. **If `bc` segfaults while running arg tests when
 updating, it is because the global locale files have not been replaced. Make
 sure to either prevent the test suite from running on update or remove the old
 locale files before updating.** (Removing the locale files can be done with
-`make uninstall` or by running the `locale_uninstall.sh` script.) Once this is
-done, `bc` should install without problems.*
+`make uninstall` or by running the [`locale_uninstall.sh`][22] script.) Once
+this is done, `bc` should install without problems.*
 
 *Second, **the option to build without signal support has been removed**. See
 below for the reasons why.*
@@ -302,7 +502,7 @@ diameter of the universe in Planck lengths.
 
 (For 32-bit, these numbers are either 32 integer digits or 12 integer digits and
 20 fractional digits. These are also quite big, and going much bigger on a
-32-bit system seems a little pointless since 12 digits in just under a trillion
+32-bit system seems a little pointless since 12 digits is just under a trillion
 and 20 fractional digits is still enough for about any use since `10^-20` light
 years is just under a millimeter.)
 
@@ -990,7 +1190,7 @@ not thoroughly tested.
 [1]: https://docs.microsoft.com/en-us/windows/wsl/install-win10
 [2]: https://pkg.musl.cc/bc/
 [3]: http://lcamtuf.coredump.cx/afl/
-[4]: ./karatsuba.py
+[4]: ./scripts/karatsuba.py
 [5]: ./README.md
 [6]: ./configure.sh
 [7]: https://github.com/rain-1/linenoise-mob
@@ -998,7 +1198,7 @@ not thoroughly tested.
 [9]: ./manuals/bc/A.1.md
 [10]: ./manuals/dc/A.1.md
 [11]: https://scan.coverity.com/projects/gavinhoward-bc
-[12]: ./locale_install.sh
+[12]: ./scripts/locale_install.sh
 [13]: ./manuals/build.md
 [14]: https://github.com/stesser
 [15]: https://github.com/bugcrazy
@@ -1008,3 +1208,4 @@ not thoroughly tested.
 [19]: ./manuals/benchmarks.md
 [20]: https://github.com/apjanke/ronn-ng
 [21]: https://pandoc.org/
+[22]: ./scripts/locale_uninstall.sh

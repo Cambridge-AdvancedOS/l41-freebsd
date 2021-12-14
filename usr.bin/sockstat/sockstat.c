@@ -710,6 +710,8 @@ gather_inet(int proto)
 			sockaddr(&faddr->address, sock->family,
 			    &xip->in6p_faddr, xip->inp_fport);
 		}
+		if (proto == IPPROTO_TCP)
+			faddr->encaps_port = xtp->xt_encaps_port;
 		laddr->next = NULL;
 		faddr->next = NULL;
 		sock->laddr = laddr;
@@ -854,7 +856,7 @@ printaddr(struct sockaddr_storage *ss)
 
 	switch (ss->ss_family) {
 	case AF_INET:
-		if (inet_lnaof(sstosin(ss)->sin_addr) == INADDR_ANY)
+		if (sstosin(ss)->sin_addr.s_addr == INADDR_ANY)
 			addrstr[0] = '*';
 		port = ntohs(sstosin(ss)->sin_port);
 		break;
@@ -1087,10 +1089,13 @@ displaysock(struct sock *s, int pos)
 		}
 		if (opt_U) {
 			if (faddr != NULL &&
-			    s->proto == IPPROTO_SCTP &&
-			    s->state != SCTP_CLOSED &&
-			    s->state != SCTP_BOUND &&
-			    s->state != SCTP_LISTEN) {
+			    ((s->proto == IPPROTO_SCTP &&
+			      s->state != SCTP_CLOSED &&
+			      s->state != SCTP_BOUND &&
+			      s->state != SCTP_LISTEN) ||
+			     (s->proto == IPPROTO_TCP &&
+			      s->state != TCPS_CLOSED &&
+			      s->state != TCPS_LISTEN))) {
 				while (pos < offset)
 					pos += xprintf(" ");
 				pos += xprintf("%u",

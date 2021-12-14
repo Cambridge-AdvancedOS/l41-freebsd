@@ -37,6 +37,7 @@ __FBSDID("$FreeBSD$");
 #include <framebuffer.h>
 #include "bootstrap.h"
 
+extern int boot_services_gone;
 extern EFI_GUID gop_guid;
 static EFI_GUID simple_input_ex_guid = EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL_GUID;
 static SIMPLE_TEXT_OUTPUT_INTERFACE	*conout;
@@ -176,6 +177,9 @@ efi_text_cursor(void *arg, const teken_pos_t *p)
 	teken_gfx_t *state = arg;
 	UINTN col, row;
 
+	if (boot_services_gone)
+		return;
+
 	row = p->tp_row;
 	if (p->tp_row >= state->tg_tp.tp_row)
 		row = state->tg_tp.tp_row - 1;
@@ -234,6 +238,9 @@ efi_text_putchar(void *s, const teken_pos_t *p, teken_char_t c,
 	EFI_STATUS status;
 	int idx;
 
+	if (boot_services_gone)
+		return;
+
 	idx = p->tp_col + p->tp_row * state->tg_tp.tp_col;
 	if (idx >= state->tg_tp.tp_col * state->tg_tp.tp_row)
 		return;
@@ -250,6 +257,9 @@ efi_text_fill(void *arg, const teken_rect_t *r, teken_char_t c,
 {
 	teken_gfx_t *state = arg;
 	teken_pos_t p;
+
+	if (boot_services_gone)
+		return;
 
 	if (state->tg_cursor_visible)
 		conout->EnableCursor(conout, FALSE);
@@ -303,6 +313,9 @@ efi_text_copy(void *arg, const teken_rect_t *r, const teken_pos_t *p)
 	int nrow, ncol, x, y; /* Has to be signed - >= 0 comparison */
 	bool scroll = false;
 
+	if (boot_services_gone)
+		return;
+
 	/*
 	 * Copying is a little tricky. We must make sure we do it in
 	 * correct order, to make sure we don't overwrite our own data.
@@ -355,6 +368,9 @@ static void
 efi_text_param(void *arg, int cmd, unsigned int value)
 {
 	teken_gfx_t *state = arg;
+
+	if (boot_services_gone)
+		return;
 
 	switch (cmd) {
 	case TP_SETLOCALCURSOR:
@@ -730,6 +746,9 @@ efi_term_emu(int c)
 	int t, i;
 	EFI_STATUS status;
  
+	if (boot_services_gone)
+		return;
+
 	switch (esc) {
 	case 0:
 		switch (c) {
@@ -839,7 +858,8 @@ efi_term_emu(int c)
 		break;
 	}
 #else
-	efi_cons_rawputchar(c);
+	if (!boot_services_gone)
+		efi_cons_rawputchar(c);
 #endif
 }
 
@@ -885,6 +905,9 @@ cons_update_mode(bool use_gfx_mode)
 	teken_attr_t attr;
 	EFI_STATUS status;
 	char env[10], *ptr;
+
+	if (!efi_started)
+		return (false);
 
 	/*
 	 * Despite the use_gfx_mode, we want to make sure we call
@@ -949,13 +972,24 @@ cons_update_mode(bool use_gfx_mode)
 
 			/*
 			 * setup_font() can adjust terminal size.
-			 * Note, we do use UEFI terminal dimensions first,
-			 * this is because the font selection will attempt
-			 * to achieve at least this terminal dimension and
-			 * we do not end up with too small font.
+			 * We can see two kind of bad happening.
+			 * We either can get too small console font - requested
+			 * terminal size is large, display resolution is
+			 * large, and we get very small font.
+			 * Or, we can get too large font - requested
+			 * terminal size is small and this will cause large
+			 * font to be selected.
+			 * Now, the setup_font() is updated to consider
+			 * display density and this should give us mostly
+			 * acceptable font. However, the catch is, not all
+			 * display devices will give us display density.
+			 * Still, we do hope, external monitors do - this is
+			 * where the display size will matter the most.
+			 * And for laptop screens, we should still get good
+			 * results by requesting 80x25 terminal.
 			 */
-			gfx_state.tg_tp.tp_row = rows;
-			gfx_state.tg_tp.tp_col = cols;
+			gfx_state.tg_tp.tp_row = 25;
+			gfx_state.tg_tp.tp_col = 80;
 			setup_font(&gfx_state, fb_height, fb_width);
 			rows = gfx_state.tg_tp.tp_row;
 			cols = gfx_state.tg_tp.tp_col;

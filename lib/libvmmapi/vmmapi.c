@@ -111,13 +111,14 @@ vm_create(const char *name)
 	/* Try to load vmm(4) module before creating a guest. */
 	if (modfind("vmm") < 0)
 		kldload("vmm");
-	return (CREATE((char *)name));
+	return (CREATE(name));
 }
 
 struct vmctx *
 vm_open(const char *name)
 {
 	struct vmctx *vm;
+	int saved_errno;
 
 	vm = malloc(sizeof(struct vmctx) + strlen(name) + 1);
 	assert(vm != NULL);
@@ -133,7 +134,9 @@ vm_open(const char *name)
 
 	return (vm);
 err:
-	vm_destroy(vm);
+	saved_errno = errno;
+	free(vm);
+	errno = saved_errno;
 	return (NULL);
 }
 
@@ -150,14 +153,14 @@ vm_destroy(struct vmctx *vm)
 }
 
 int
-vm_parse_memsize(const char *optarg, size_t *ret_memsize)
+vm_parse_memsize(const char *opt, size_t *ret_memsize)
 {
 	char *endptr;
 	size_t optval;
 	int error;
 
-	optval = strtoul(optarg, &endptr, 0);
-	if (*optarg != '\0' && *endptr == '\0') {
+	optval = strtoul(opt, &endptr, 0);
+	if (*opt != '\0' && *endptr == '\0') {
 		/*
 		 * For the sake of backward compatibility if the memory size
 		 * specified on the command line is less than a megabyte then
@@ -168,7 +171,7 @@ vm_parse_memsize(const char *optarg, size_t *ret_memsize)
 		*ret_memsize = optval;
 		error = 0;
 	} else
-		error = expand_number(optarg, ret_memsize);
+		error = expand_number(opt, ret_memsize);
 
 	return (error);
 }
@@ -249,6 +252,19 @@ vm_get_guestmem_from_ctx(struct vmctx *ctx, char **guest_baseaddr,
 	*lowmem_size = ctx->lowmem;
 	*highmem_size = ctx->highmem;
 	return (0);
+}
+
+int
+vm_munmap_memseg(struct vmctx *ctx, vm_paddr_t gpa, size_t len)
+{
+	struct vm_munmap munmap;
+	int error;
+
+	munmap.gpa = gpa;
+	munmap.len = len;
+
+	error = ioctl(ctx->fd, VM_MUNMAP_MEMSEG, &munmap);
+	return (error);
 }
 
 int
@@ -713,7 +729,7 @@ vm_inject_exception(struct vmctx *ctx, int vcpu, int vector, int errcode_valid,
 }
 
 int
-vm_apicid2vcpu(struct vmctx *ctx, int apicid)
+vm_apicid2vcpu(struct vmctx *ctx __unused, int apicid)
 {
 	/*
 	 * The apic id associated with the 'vcpu' has the same numerical value
@@ -891,7 +907,7 @@ vm_capability_name2type(const char *capname)
 {
 	int i;
 
-	for (i = 0; i < nitems(capstrmap); i++) {
+	for (i = 0; i < (int)nitems(capstrmap); i++) {
 		if (strcmp(capstrmap[i], capname) == 0)
 			return (i);
 	}
@@ -902,7 +918,7 @@ vm_capability_name2type(const char *capname)
 const char *
 vm_capability_type2name(int type)
 {
-	if (type >= 0 && type < nitems(capstrmap))
+	if (type >= 0 && type < (int)nitems(capstrmap))
 		return (capstrmap[type]);
 
 	return (NULL);
@@ -978,6 +994,22 @@ vm_map_pptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
 	pptmmio.hpa = hpa;
 
 	return (ioctl(ctx->fd, VM_MAP_PPTDEV_MMIO, &pptmmio));
+}
+
+int
+vm_unmap_pptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
+		     vm_paddr_t gpa, size_t len)
+{
+	struct vm_pptdev_mmio pptmmio;
+
+	bzero(&pptmmio, sizeof(pptmmio));
+	pptmmio.bus = bus;
+	pptmmio.slot = slot;
+	pptmmio.func = func;
+	pptmmio.gpa = gpa;
+	pptmmio.len = len;
+
+	return (ioctl(ctx->fd, VM_UNMAP_PPTDEV_MMIO, &pptmmio));
 }
 
 int
@@ -1334,8 +1366,8 @@ vm_copy_setup(struct vmctx *ctx, int vcpu, struct vm_guest_paging *paging,
     int *fault)
 {
 	void *va;
-	uint64_t gpa;
-	int error, i, n, off;
+	uint64_t gpa, off;
+	int error, i, n;
 
 	for (i = 0; i < iovcnt; i++) {
 		iov[i].iov_base = 0;
@@ -1349,7 +1381,7 @@ vm_copy_setup(struct vmctx *ctx, int vcpu, struct vm_guest_paging *paging,
 			return (error);
 
 		off = gpa & PAGE_MASK;
-		n = min(len, PAGE_SIZE - off);
+		n = MIN(len, PAGE_SIZE - off);
 
 		va = vm_map_gpa(ctx, gpa, n);
 		if (va == NULL)
@@ -1367,14 +1399,14 @@ vm_copy_setup(struct vmctx *ctx, int vcpu, struct vm_guest_paging *paging,
 }
 
 void
-vm_copy_teardown(struct vmctx *ctx, int vcpu, struct iovec *iov, int iovcnt)
+vm_copy_teardown(struct vmctx *ctx __unused, int vcpu __unused,
+    struct iovec *iov __unused, int iovcnt __unused)
 {
-
-	return;
 }
 
 void
-vm_copyin(struct vmctx *ctx, int vcpu, struct iovec *iov, void *vp, size_t len)
+vm_copyin(struct vmctx *ctx __unused, int vcpu __unused, struct iovec *iov,
+    void *vp, size_t len)
 {
 	const char *src;
 	char *dst;
@@ -1394,8 +1426,8 @@ vm_copyin(struct vmctx *ctx, int vcpu, struct iovec *iov, void *vp, size_t len)
 }
 
 void
-vm_copyout(struct vmctx *ctx, int vcpu, const void *vp, struct iovec *iov,
-    size_t len)
+vm_copyout(struct vmctx *ctx __unused, int vcpu __unused, const void *vp,
+    struct iovec *iov, size_t len)
 {
 	const char *src;
 	char *dst;
@@ -1644,7 +1676,7 @@ vm_get_ioctls(size_t *len)
 	/* keep in sync with machine/vmm_dev.h */
 	static const cap_ioctl_t vm_ioctl_cmds[] = { VM_RUN, VM_SUSPEND, VM_REINIT,
 	    VM_ALLOC_MEMSEG, VM_GET_MEMSEG, VM_MMAP_MEMSEG, VM_MMAP_MEMSEG,
-	    VM_MMAP_GETNEXT, VM_SET_REGISTER, VM_GET_REGISTER,
+	    VM_MMAP_GETNEXT, VM_MUNMAP_MEMSEG, VM_SET_REGISTER, VM_GET_REGISTER,
 	    VM_SET_SEGMENT_DESCRIPTOR, VM_GET_SEGMENT_DESCRIPTOR,
 	    VM_SET_REGISTER_SET, VM_GET_REGISTER_SET,
 	    VM_SET_KERNEMU_DEV, VM_GET_KERNEMU_DEV,
@@ -1654,7 +1686,7 @@ vm_get_ioctls(size_t *len)
 	    VM_ISA_DEASSERT_IRQ, VM_ISA_PULSE_IRQ, VM_ISA_SET_IRQ_TRIGGER,
 	    VM_SET_CAPABILITY, VM_GET_CAPABILITY, VM_BIND_PPTDEV,
 	    VM_UNBIND_PPTDEV, VM_MAP_PPTDEV_MMIO, VM_PPTDEV_MSI,
-	    VM_PPTDEV_MSIX, VM_PPTDEV_DISABLE_MSIX,
+	    VM_PPTDEV_MSIX, VM_UNMAP_PPTDEV_MMIO, VM_PPTDEV_DISABLE_MSIX,
 	    VM_INJECT_NMI, VM_STATS, VM_STAT_DESC,
 	    VM_SET_X2APIC_STATE, VM_GET_X2APIC_STATE,
 	    VM_GET_HPET_CAPABILITIES, VM_GET_GPA_PMAP, VM_GLA2GPA,

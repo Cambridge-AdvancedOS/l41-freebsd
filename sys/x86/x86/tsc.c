@@ -42,7 +42,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/time.h>
 #include <sys/timetc.h>
 #include <sys/kernel.h>
-#include <sys/power.h>
 #include <sys/smp.h>
 #include <sys/vdso.h>
 #include <machine/clock.h>
@@ -503,6 +502,14 @@ test_tsc(int adj_max_count)
 
 	if ((!smp_tsc && !tsc_is_invariant))
 		return (-100);
+	/*
+	 * Misbehavior of TSC under VirtualBox has been observed.  In
+	 * particular, threads doing small (~1 second) sleeps may miss their
+	 * wakeup and hang around in sleep state, causing hangs on shutdown.
+	 */
+	if (vm_guest == VM_GUEST_VBOX)
+		return (0);
+
 	size = (mp_maxid + 1) * 3;
 	data = malloc(sizeof(*data) * size * N, M_TEMP, M_WAITOK);
 	adj = 0;
@@ -576,23 +583,6 @@ init_TSC_tc(void)
 	max_freq = UINT_MAX;
 
 	/*
-	 * We can not use the TSC if we support APM.  Precise timekeeping
-	 * on an APM'ed machine is at best a fools pursuit, since 
-	 * any and all of the time spent in various SMM code can't 
-	 * be reliably accounted for.  Reading the RTC is your only
-	 * source of reliable time info.  The i8254 loses too, of course,
-	 * but we need to have some kind of time...
-	 * We don't know at this point whether APM is going to be used
-	 * or not, nor when it might be activated.  Play it safe.
-	 */
-	if (power_pm_get_type() == POWER_PM_TYPE_APM) {
-		tsc_timecounter.tc_quality = -1000;
-		if (bootverbose)
-			printf("TSC timecounter disabled: APM enabled.\n");
-		goto init;
-	}
-
-	/*
 	 * Intel CPUs without a C-state invariant TSC can stop the TSC
 	 * in either C2 or C3.  Disable use of C2 and C3 while using
 	 * the TSC as the timecounter.  The timecounter can be changed
@@ -627,7 +617,6 @@ init_TSC_tc(void)
 		tsc_timecounter.tc_quality = 1000;
 	max_freq >>= tsc_shift;
 
-init:
 	for (shift = 0; shift <= 31 && (tsc_freq >> shift) > max_freq; shift++)
 		;
 
@@ -862,6 +851,8 @@ x86_tsc_vdso_timehands(struct vdso_timehands *vdso_th, struct timecounter *tc)
 	vdso_th->th_algo = VDSO_TH_ALGO_X86_TSC;
 	vdso_th->th_x86_shift = (int)(intptr_t)tc->tc_priv;
 	vdso_th->th_x86_hpet_idx = 0xffffffff;
+	vdso_th->th_x86_pvc_last_systime = 0;
+	vdso_th->th_x86_pvc_stable_mask = 0;
 	bzero(vdso_th->th_res, sizeof(vdso_th->th_res));
 	return (1);
 }
@@ -875,6 +866,8 @@ x86_tsc_vdso_timehands32(struct vdso_timehands32 *vdso_th32,
 	vdso_th32->th_algo = VDSO_TH_ALGO_X86_TSC;
 	vdso_th32->th_x86_shift = (int)(intptr_t)tc->tc_priv;
 	vdso_th32->th_x86_hpet_idx = 0xffffffff;
+	vdso_th32->th_x86_pvc_last_systime = 0;
+	vdso_th32->th_x86_pvc_stable_mask = 0;
 	bzero(vdso_th32->th_res, sizeof(vdso_th32->th_res));
 	return (1);
 }

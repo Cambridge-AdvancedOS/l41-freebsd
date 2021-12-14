@@ -510,15 +510,13 @@ ipf_p_ftp_addport(softf, fin, ip, nat, ftp, dlen, nport, inc)
 	fi.fin_src6 = nat->nat_ndst6;
 	fi.fin_dst6 = nat->nat_nsrc6;
 
-	if (nat->nat_v[0] == 6) {
 #ifndef USE_INET6
+	if (nat->nat_v[0] == 6)
 		return APR_INC(inc);
 #endif
-	}
 
 	/*
-	 * Add skeleton NAT entry for connection which will come back the
-	 * other way.
+	 * If an existing entry already exists, use it instead.
 	 */
 #ifdef USE_INET6
 	if (nat->nat_v[0] == 6) {
@@ -551,6 +549,9 @@ ipf_p_ftp_addport(softf, fin, ip, nat, ftp, dlen, nport, inc)
 	if (nat2 != NULL)
 		return APR_INC(inc);
 
+	/*
+	 * An existing entry doesn't exist. Let's make one.
+	 */
 	ipn = ipf_proxy_rule_rev(nat);
 	if (ipn == NULL)
 		return APR_ERR(1);
@@ -582,15 +583,14 @@ ipf_p_ftp_addport(softf, fin, ip, nat, ftp, dlen, nport, inc)
 	flags = SI_W_SPORT|NAT_SLAVE|IPN_TCP;
 
 	MUTEX_ENTER(&softn->ipf_nat_new);
-	if (nat->nat_v[0] == 6) {
 #ifdef USE_INET6
+	if (nat->nat_v[0] == 6)
 		nat2 = ipf_nat6_add(&fi, ipn, &ftp->ftp_pendnat, flags,
 				    direction);
+	else
 #endif
-	} else {
 		nat2 = ipf_nat_add(&fi, ipn, &ftp->ftp_pendnat, flags,
 				   direction);
-	}
 	MUTEX_EXIT(&softn->ipf_nat_new);
 
 	if (nat2 == NULL) {
@@ -950,13 +950,12 @@ ipf_p_ftp_pasvreply(softf, fin, ip, nat, ftp, port, newmsg, s)
 	MUTEX_EXIT(&nat2->nat_lock);
 	fi.fin_ifp = NULL;
 	if (nat->nat_dir == NAT_INBOUND) {
-		if (nat->nat_v[0] == 6) {
 #ifdef USE_INET6
+		if (nat->nat_v[0] == 6)
 			fi.fin_dst6 = nat->nat_ndst6;
+		else
 #endif
-		} else {
 			fi.fin_daddr = nat->nat_ndstaddr;
-		}
 	}
 	if (ipf_state_add(softc, &fi, (ipstate_t **)&ftp->ftp_pendstate,
 			  SI_W_SPORT) != 0)
@@ -979,15 +978,14 @@ ipf_p_ftp_pasvreply(softf, fin, ip, nat, ftp, port, newmsg, s)
 	if (inc != 0) {
 		fin->fin_plen += inc;
 		fin->fin_dlen += inc;
-		if (nat->nat_v[0] == 6) {
 #ifdef USE_INET6
+		if (nat->nat_v[0] == 6) {
 			ip6 = (ip6_t *)fin->fin_ip;
 			u_short len = ntohs(ip6->ip6_plen) + inc;
 			ip6->ip6_plen = htons(len);
+		} else
 #endif
-		} else {
 			ip->ip_len = htons(fin->fin_plen);
-		}
 	}
 
 	return APR_INC(inc);
@@ -1262,15 +1260,13 @@ ipf_p_ftp_valid(softf, ftp, side, buf, len)
 	size_t len;
 {
 	ftpside_t *ftps;
-	int ret;
 
 	ftps = &ftp->ftp_side[side];
 
 	if (side == 0)
-		ret = ipf_p_ftp_client_valid(softf, ftps, buf, len);
+		return(ipf_p_ftp_client_valid(softf, ftps, buf, len));
 	else
-		ret = ipf_p_ftp_server_valid(softf, ftps, buf, len);
-	return ret;
+		return(ipf_p_ftp_server_valid(softf, ftps, buf, len));
 }
 
 
@@ -1419,7 +1415,7 @@ ipf_p_ftp_process(softf, fin, nat, ftp, rv)
 				printf("%s:seq[0](%u) + (%d) != (%u)\n",
 				       "ipf_p_ftp_process", t->ftps_seq[0],
 				       ackoff, thack);
-				printf("%s:seq[0](%u) + (%d) != (%u)\n",
+				printf("%s:seq[1](%u) + (%d) != (%u)\n",
 				       "ipf_p_ftp_process", t->ftps_seq[1],
 				       ackoff, thack);
 			}
@@ -1529,6 +1525,8 @@ whilemore:
 			len = wptr - rptr;
 			f->ftps_junk = ipf_p_ftp_valid(softf, ftp, rv,
 						       rptr, len);
+			DT5(junk_ftp_valid, int, len, int, rv, u_long, rptr,
+			    u_long, wptr, int, f->ftps_junk);
 
 			if (softf->ipf_p_ftp_debug & DEBUG_PARSE) {
 				printf("%s=%d len %d rv %d ptr %lx/%lx ",

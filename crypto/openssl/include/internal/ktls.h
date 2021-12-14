@@ -38,12 +38,11 @@
 #   define OPENSSL_KTLS_AES_GCM_128
 #   define OPENSSL_KTLS_AES_GCM_256
 #   define OPENSSL_KTLS_TLS13
-
-/*
- * Only used by the tests in sslapitest.c.
- */
-#   define TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE             8
-#   define TLS_CIPHER_AES_GCM_256_REC_SEQ_SIZE             8
+#   ifdef TLS_CHACHA20_IV_LEN
+#    ifndef OPENSSL_NO_CHACHA
+#     define OPENSSL_KTLS_CHACHA20_POLY1305
+#    endif
+#   endif
 
 typedef struct tls_enable ktls_crypto_info_t;
 
@@ -192,15 +191,12 @@ static ossl_inline int ktls_read_record(int fd, void *data, size_t length)
 static ossl_inline ossl_ssize_t ktls_sendfile(int s, int fd, off_t off,
                                               size_t size, int flags)
 {
-    off_t sbytes;
+    off_t sbytes = 0;
     int ret;
 
     ret = sendfile(fd, s, off, size, NULL, &sbytes, flags);
-    if (ret == -1) {
-	    if (errno == EAGAIN && sbytes != 0)
-		    return sbytes;
-	    return -1;
-    }
+    if (ret == -1 && sbytes == 0)
+        return -1;
     return sbytes;
 }
 
@@ -222,6 +218,11 @@ static ossl_inline ossl_ssize_t ktls_sendfile(int s, int fd, off_t off,
 #    define OPENSSL_KTLS_TLS13
 #    if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
 #     define OPENSSL_KTLS_AES_CCM_128
+#     if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+#      ifndef OPENSSL_NO_CHACHA
+#       define OPENSSL_KTLS_CHACHA20_POLY1305
+#      endif
+#     endif
 #    endif
 #   endif
 
@@ -254,6 +255,9 @@ struct tls_crypto_info_all {
 #   endif
 #   ifdef OPENSSL_KTLS_AES_CCM_128
         struct tls12_crypto_info_aes_ccm_128 ccm128;
+#   endif
+#   ifdef OPENSSL_KTLS_CHACHA20_POLY1305
+        struct tls12_crypto_info_chacha20_poly1305 chacha20poly1305;
 #   endif
     };
     size_t tls_crypto_info_len;

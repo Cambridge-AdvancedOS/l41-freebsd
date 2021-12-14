@@ -3629,9 +3629,8 @@ sctp_process_cmsgs_for_init(struct sctp_tcb *stcb, struct mbuf *control, int *er
 					}
 					for (i = 0; i < stcb->asoc.streamoutcnt; i++) {
 						TAILQ_INIT(&stcb->asoc.strmout[i].outqueue);
+						stcb->asoc.ss_functions.sctp_ss_init_stream(stcb, &stcb->asoc.strmout[i], NULL);
 						stcb->asoc.strmout[i].chunks_on_queues = 0;
-						stcb->asoc.strmout[i].next_mid_ordered = 0;
-						stcb->asoc.strmout[i].next_mid_unordered = 0;
 #if defined(SCTP_DETAILED_STR_STATS)
 						for (j = 0; j < SCTP_PR_SCTP_MAX + 1; j++) {
 							stcb->asoc.strmout[i].abandoned_sent[j] = 0;
@@ -3641,10 +3640,11 @@ sctp_process_cmsgs_for_init(struct sctp_tcb *stcb, struct mbuf *control, int *er
 						stcb->asoc.strmout[i].abandoned_sent[0] = 0;
 						stcb->asoc.strmout[i].abandoned_unsent[0] = 0;
 #endif
+						stcb->asoc.strmout[i].next_mid_ordered = 0;
+						stcb->asoc.strmout[i].next_mid_unordered = 0;
 						stcb->asoc.strmout[i].sid = i;
 						stcb->asoc.strmout[i].last_msg_incomplete = 0;
 						stcb->asoc.strmout[i].state = SCTP_STREAM_OPENING;
-						stcb->asoc.ss_functions.sctp_ss_init_stream(stcb, &stcb->asoc.strmout[i], NULL);
 					}
 				}
 				break;
@@ -4220,7 +4220,7 @@ sctp_lowlevel_chunk_output(struct sctp_inpcb *inp,
 #endif
 			/* send it out.  table id is taken from stcb */
 			SCTP_PROBE5(send, NULL, stcb, ip, stcb, sctphdr);
-			SCTP_IP_OUTPUT(ret, o_pak, ro, stcb, vrf_id);
+			SCTP_IP_OUTPUT(ret, o_pak, ro, inp, vrf_id);
 			if (port) {
 				UDPSTAT_INC(udps_opackets);
 			}
@@ -4544,7 +4544,7 @@ sctp_lowlevel_chunk_output(struct sctp_inpcb *inp,
 				sctp_packet_log(o_pak);
 #endif
 			SCTP_PROBE5(send, NULL, stcb, ip6h, stcb, sctphdr);
-			SCTP_IP6_OUTPUT(ret, o_pak, (struct route_in6 *)ro, &ifp, stcb, vrf_id);
+			SCTP_IP6_OUTPUT(ret, o_pak, (struct route_in6 *)ro, &ifp, inp, vrf_id);
 			if (net) {
 				/* for link local this must be done */
 				sin6->sin6_scope_id = prev_scope;
@@ -5232,31 +5232,33 @@ invalid_size:
 	return (op_err);
 }
 
-static int
+/*
+ * Given a INIT chunk, look through the parameters to verify that there
+ * are no new addresses.
+ * Return true, if there is a new address or there is a problem parsing
+   the parameters. Provide an optional error cause used when sending an ABORT.
+ * Return false, if there are no new addresses and there is no problem in
+   parameter processing.
+ */
+static bool
 sctp_are_there_new_addresses(struct sctp_association *asoc,
-    struct mbuf *in_initpkt, int offset, struct sockaddr *src)
+    struct mbuf *in_initpkt, int offset, int limit, struct sockaddr *src,
+    struct mbuf **op_err)
 {
-	/*
-	 * Given a INIT packet, look through the packet to verify that there
-	 * are NO new addresses. As we go through the parameters add reports
-	 * of any un-understood parameters that require an error.  Also we
-	 * must return (1) to drop the packet if we see a un-understood
-	 * parameter that tells us to drop the chunk.
-	 */
 	struct sockaddr *sa_touse;
 	struct sockaddr *sa;
 	struct sctp_paramhdr *phdr, params;
-	uint16_t ptype, plen;
-	uint8_t fnd;
 	struct sctp_nets *net;
-	int check_src;
 #ifdef INET
 	struct sockaddr_in sin4, *sa4;
 #endif
 #ifdef INET6
 	struct sockaddr_in6 sin6, *sa6;
 #endif
+	uint16_t ptype, plen;
+	bool fnd, check_src;
 
+	*op_err = NULL;
 #ifdef INET
 	memset(&sin4, 0, sizeof(sin4));
 	sin4.sin_family = AF_INET;
@@ -5268,19 +5270,19 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 	sin6.sin6_len = sizeof(sin6);
 #endif
 	/* First what about the src address of the pkt ? */
-	check_src = 0;
+	check_src = false;
 	switch (src->sa_family) {
 #ifdef INET
 	case AF_INET:
 		if (asoc->scope.ipv4_addr_legal) {
-			check_src = 1;
+			check_src = true;
 		}
 		break;
 #endif
 #ifdef INET6
 	case AF_INET6:
 		if (asoc->scope.ipv6_addr_legal) {
-			check_src = 1;
+			check_src = true;
 		}
 		break;
 #endif
@@ -5289,7 +5291,7 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 		break;
 	}
 	if (check_src) {
-		fnd = 0;
+		fnd = false;
 		TAILQ_FOREACH(net, &asoc->nets, sctp_next) {
 			sa = (struct sockaddr *)&net->ro._l_addr;
 			if (sa->sa_family == src->sa_family) {
@@ -5300,7 +5302,7 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 					sa4 = (struct sockaddr_in *)sa;
 					src4 = (struct sockaddr_in *)src;
 					if (sa4->sin_addr.s_addr == src4->sin_addr.s_addr) {
-						fnd = 1;
+						fnd = true;
 						break;
 					}
 				}
@@ -5312,16 +5314,22 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 					sa6 = (struct sockaddr_in6 *)sa;
 					src6 = (struct sockaddr_in6 *)src;
 					if (SCTP6_ARE_ADDR_EQUAL(sa6, src6)) {
-						fnd = 1;
+						fnd = true;
 						break;
 					}
 				}
 #endif
 			}
 		}
-		if (fnd == 0) {
-			/* New address added! no need to look further. */
-			return (1);
+		if (!fnd) {
+			/*
+			 * If sending an ABORT in case of an additional
+			 * address, don't use the new address error cause.
+			 * This looks no different than if no listener was
+			 * present.
+			 */
+			*op_err = sctp_generate_cause(SCTP_BASE_SYSCTL(sctp_diag_info_code), "Address added");
+			return (true);
 		}
 	}
 	/* Ok so far lets munge through the rest of the packet */
@@ -5331,6 +5339,14 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 		sa_touse = NULL;
 		ptype = ntohs(phdr->param_type);
 		plen = ntohs(phdr->param_length);
+		if (offset + plen > limit) {
+			*op_err = sctp_generate_cause(SCTP_CAUSE_PROTOCOL_VIOLATION, "Partial parameter");
+			return (true);
+		}
+		if (plen < sizeof(struct sctp_paramhdr)) {
+			*op_err = sctp_generate_cause(SCTP_CAUSE_PROTOCOL_VIOLATION, "Parameter length too small");
+			return (true);
+		}
 		switch (ptype) {
 #ifdef INET
 		case SCTP_IPV4_ADDRESS:
@@ -5338,12 +5354,14 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 				struct sctp_ipv4addr_param *p4, p4_buf;
 
 				if (plen != sizeof(struct sctp_ipv4addr_param)) {
-					return (1);
+					*op_err = sctp_generate_cause(SCTP_CAUSE_PROTOCOL_VIOLATION, "Parameter length illegal");
+					return (true);
 				}
 				phdr = sctp_get_next_param(in_initpkt, offset,
 				    (struct sctp_paramhdr *)&p4_buf, sizeof(p4_buf));
 				if (phdr == NULL) {
-					return (1);
+					*op_err = sctp_generate_cause(SCTP_CAUSE_PROTOCOL_VIOLATION, "");
+					return (true);
 				}
 				if (asoc->scope.ipv4_addr_legal) {
 					p4 = (struct sctp_ipv4addr_param *)phdr;
@@ -5359,12 +5377,14 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 				struct sctp_ipv6addr_param *p6, p6_buf;
 
 				if (plen != sizeof(struct sctp_ipv6addr_param)) {
-					return (1);
+					*op_err = sctp_generate_cause(SCTP_CAUSE_PROTOCOL_VIOLATION, "Parameter length illegal");
+					return (true);
 				}
 				phdr = sctp_get_next_param(in_initpkt, offset,
 				    (struct sctp_paramhdr *)&p6_buf, sizeof(p6_buf));
 				if (phdr == NULL) {
-					return (1);
+					*op_err = sctp_generate_cause(SCTP_CAUSE_PROTOCOL_VIOLATION, "");
+					return (true);
 				}
 				if (asoc->scope.ipv6_addr_legal) {
 					p6 = (struct sctp_ipv6addr_param *)phdr;
@@ -5381,7 +5401,7 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 		}
 		if (sa_touse) {
 			/* ok, sa_touse points to one to check */
-			fnd = 0;
+			fnd = false;
 			TAILQ_FOREACH(net, &asoc->nets, sctp_next) {
 				sa = (struct sockaddr *)&net->ro._l_addr;
 				if (sa->sa_family != sa_touse->sa_family) {
@@ -5392,7 +5412,7 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 					sa4 = (struct sockaddr_in *)sa;
 					if (sa4->sin_addr.s_addr ==
 					    sin4.sin_addr.s_addr) {
-						fnd = 1;
+						fnd = true;
 						break;
 					}
 				}
@@ -5402,21 +5422,31 @@ sctp_are_there_new_addresses(struct sctp_association *asoc,
 					sa6 = (struct sockaddr_in6 *)sa;
 					if (SCTP6_ARE_ADDR_EQUAL(
 					    sa6, &sin6)) {
-						fnd = 1;
+						fnd = true;
 						break;
 					}
 				}
 #endif
 			}
 			if (!fnd) {
-				/* New addr added! no need to look further */
-				return (1);
+				/*
+				 * If sending an ABORT in case of an
+				 * additional address, don't use the new
+				 * address error cause. This looks no
+				 * different than if no listener was
+				 * present.
+				 */
+				*op_err = sctp_generate_cause(SCTP_BASE_SYSCTL(sctp_diag_info_code), "Address added");
+				return (true);
 			}
 		}
 		offset += SCTP_SIZE32(plen);
+		if (offset >= limit) {
+			break;
+		}
 		phdr = sctp_get_next_param(in_initpkt, offset, &params, sizeof(params));
 	}
-	return (0);
+	return (false);
 }
 
 /*
@@ -5472,17 +5502,11 @@ sctp_send_initiate_ack(struct sctp_inpcb *inp, struct sctp_tcb *stcb,
 	}
 	if ((asoc != NULL) &&
 	    (SCTP_GET_STATE(stcb) != SCTP_STATE_COOKIE_WAIT)) {
-		if (sctp_are_there_new_addresses(asoc, init_pkt, offset, src)) {
+		if (sctp_are_there_new_addresses(asoc, init_pkt, offset, offset + ntohs(init_chk->ch.chunk_length), src, &op_err)) {
 			/*
 			 * new addresses, out of here in non-cookie-wait
 			 * states
-			 *
-			 * Send an ABORT, without the new address error
-			 * cause. This looks no different than if no
-			 * listener was present.
 			 */
-			op_err = sctp_generate_cause(SCTP_BASE_SYSCTL(sctp_diag_info_code),
-			    "Address added");
 			sctp_send_abort(init_pkt, iphlen, src, dst, sh, 0, op_err,
 			    mflowtype, mflowid, inp->fibnum,
 			    vrf_id, port);
@@ -6607,7 +6631,7 @@ sctp_sendall_iterator(struct sctp_inpcb *inp, struct sctp_tcb *stcb, void *ptr,
 		 * us.
 		 */
 		atomic_add_int(&stcb->asoc.refcnt, 1);
-		sctp_abort_an_association(inp, stcb, m, SCTP_SO_NOT_LOCKED);
+		sctp_abort_an_association(inp, stcb, m, false, SCTP_SO_NOT_LOCKED);
 		/*
 		 * sctp_abort_an_association calls sctp_free_asoc() free
 		 * association will NOT free it since we incremented the
@@ -6691,7 +6715,7 @@ sctp_sendall_iterator(struct sctp_inpcb *inp, struct sctp_tcb *stcb, void *ptr,
 						    msg);
 						atomic_add_int(&stcb->asoc.refcnt, 1);
 						sctp_abort_an_association(stcb->sctp_ep, stcb,
-						    op_err, SCTP_SO_NOT_LOCKED);
+						    op_err, false, SCTP_SO_NOT_LOCKED);
 						atomic_add_int(&stcb->asoc.refcnt, -1);
 						goto no_chunk_output;
 					}
@@ -6746,7 +6770,9 @@ sctp_sendall_completes(void *ptr, uint32_t val SCTP_UNUSED)
 	/* now free everything */
 	if (ca->inp) {
 		/* Lets clear the flag to allow others to run. */
+		SCTP_INP_WLOCK(ca->inp);
 		ca->inp->sctp_flags &= ~SCTP_PCB_FLAGS_SND_ITERATOR_UP;
+		SCTP_INP_WUNLOCK(ca->inp);
 	}
 	sctp_m_freem(ca->m);
 	SCTP_FREE(ca, SCTP_M_COPYAL);
@@ -6801,10 +6827,6 @@ sctp_sendall(struct sctp_inpcb *inp, struct uio *uio, struct mbuf *m,
 	int ret;
 	struct sctp_copy_all *ca;
 
-	if (inp->sctp_flags & SCTP_PCB_FLAGS_SND_ITERATOR_UP) {
-		/* There is another. */
-		return (EBUSY);
-	}
 	if (uio->uio_resid > (ssize_t)SCTP_BASE_SYSCTL(sctp_sendall_limit)) {
 		/* You must not be larger than the limit! */
 		return (EMSGSIZE);
@@ -6822,6 +6844,18 @@ sctp_sendall(struct sctp_inpcb *inp, struct uio *uio, struct mbuf *m,
 	if (srcv) {
 		memcpy(&ca->sndrcv, srcv, sizeof(struct sctp_nonpad_sndrcvinfo));
 	}
+
+	/* Serialize. */
+	SCTP_INP_WLOCK(inp);
+	if ((inp->sctp_flags & SCTP_PCB_FLAGS_SND_ITERATOR_UP) != 0) {
+		SCTP_INP_WUNLOCK(inp);
+		sctp_m_freem(m);
+		SCTP_FREE(ca, SCTP_M_COPYAL);
+		return (EBUSY);
+	}
+	inp->sctp_flags |= SCTP_PCB_FLAGS_SND_ITERATOR_UP;
+	SCTP_INP_WUNLOCK(inp);
+
 	/*
 	 * take off the sendall flag, it would be bad if we failed to do
 	 * this :-0
@@ -6833,6 +6867,10 @@ sctp_sendall(struct sctp_inpcb *inp, struct uio *uio, struct mbuf *m,
 		ca->m = sctp_copy_out_all(uio, ca->sndlen);
 		if (ca->m == NULL) {
 			SCTP_FREE(ca, SCTP_M_COPYAL);
+			sctp_m_freem(m);
+			SCTP_INP_WLOCK(inp);
+			inp->sctp_flags &= ~SCTP_PCB_FLAGS_SND_ITERATOR_UP;
+			SCTP_INP_WUNLOCK(inp);
 			SCTP_LTRACE_ERR_RET(inp, NULL, NULL, SCTP_FROM_SCTP_OUTPUT, ENOMEM);
 			return (ENOMEM);
 		}
@@ -6845,14 +6883,15 @@ sctp_sendall(struct sctp_inpcb *inp, struct uio *uio, struct mbuf *m,
 			ca->sndlen += SCTP_BUF_LEN(mat);
 		}
 	}
-	inp->sctp_flags |= SCTP_PCB_FLAGS_SND_ITERATOR_UP;
 	ret = sctp_initiate_iterator(NULL, sctp_sendall_iterator, NULL,
 	    SCTP_PCB_ANY_FLAGS, SCTP_PCB_ANY_FEATURES,
 	    SCTP_ASOC_ANY_STATE,
 	    (void *)ca, 0,
 	    sctp_sendall_completes, inp, 1);
 	if (ret) {
+		SCTP_INP_WLOCK(inp);
 		inp->sctp_flags &= ~SCTP_PCB_FLAGS_SND_ITERATOR_UP;
+		SCTP_INP_WUNLOCK(inp);
 		SCTP_FREE(ca, SCTP_M_COPYAL);
 		SCTP_LTRACE_ERR_RET_PKT(m, inp, NULL, NULL, SCTP_FROM_SCTP_OUTPUT, EFAULT);
 		return (EFAULT);
@@ -9531,7 +9570,7 @@ sctp_chunk_retransmission(struct sctp_inpcb *inp,
 			    msg);
 			atomic_add_int(&stcb->asoc.refcnt, 1);
 			sctp_abort_an_association(stcb->sctp_ep, stcb, op_err,
-			    so_locked);
+			    false, so_locked);
 			SCTP_TCB_LOCK(stcb);
 			atomic_subtract_int(&stcb->asoc.refcnt, 1);
 			return (SCTP_RETRAN_EXIT);
@@ -12136,18 +12175,27 @@ sctp_send_str_reset_req(struct sctp_tcb *stcb,
 		stcb->asoc.ss_functions.sctp_ss_clear(stcb, &stcb->asoc, 0, 1);
 		for (i = 0; i < stcb->asoc.streamoutcnt; i++) {
 			TAILQ_INIT(&stcb->asoc.strmout[i].outqueue);
-			stcb->asoc.strmout[i].chunks_on_queues = oldstream[i].chunks_on_queues;
-			stcb->asoc.strmout[i].next_mid_ordered = oldstream[i].next_mid_ordered;
-			stcb->asoc.strmout[i].next_mid_unordered = oldstream[i].next_mid_unordered;
-			stcb->asoc.strmout[i].last_msg_incomplete = oldstream[i].last_msg_incomplete;
-			stcb->asoc.strmout[i].sid = i;
-			stcb->asoc.strmout[i].state = oldstream[i].state;
 			/* FIX ME FIX ME */
 			/*
 			 * This should be a SS_COPY operation FIX ME STREAM
 			 * SCHEDULER EXPERT
 			 */
 			stcb->asoc.ss_functions.sctp_ss_init_stream(stcb, &stcb->asoc.strmout[i], &oldstream[i]);
+			stcb->asoc.strmout[i].chunks_on_queues = oldstream[i].chunks_on_queues;
+#if defined(SCTP_DETAILED_STR_STATS)
+			for (j = 0; j < SCTP_PR_SCTP_MAX + 1; j++) {
+				stcb->asoc.strmout[i].abandoned_sent[j] = oldstream[i].abandoned_sent[j];
+				stcb->asoc.strmout[i].abandoned_unsent[j] = oldstream[i].abandoned_unsent[j];
+			}
+#else
+			stcb->asoc.strmout[i].abandoned_sent[0] = oldstream[i].abandoned_sent[0];
+			stcb->asoc.strmout[i].abandoned_unsent[0] = oldstream[i].abandoned_unsent[0];
+#endif
+			stcb->asoc.strmout[i].next_mid_ordered = oldstream[i].next_mid_ordered;
+			stcb->asoc.strmout[i].next_mid_unordered = oldstream[i].next_mid_unordered;
+			stcb->asoc.strmout[i].last_msg_incomplete = oldstream[i].last_msg_incomplete;
+			stcb->asoc.strmout[i].sid = i;
+			stcb->asoc.strmout[i].state = oldstream[i].state;
 			/* now anything on those queues? */
 			TAILQ_FOREACH_SAFE(sp, &oldstream[i].outqueue, next, nsp) {
 				TAILQ_REMOVE(&oldstream[i].outqueue, sp, next);
@@ -12656,8 +12704,8 @@ sctp_lower_sosend(struct socket *so,
 			if ((sinfo_flags & SCTP_ABORT) ||
 			    ((sinfo_flags & SCTP_EOF) && (sndlen == 0))) {
 				/*-
-				 * User asks to abort a non-existant assoc,
-				 * or EOF a non-existant assoc with no data
+				 * User asks to abort a non-existent assoc,
+				 * or EOF a non-existent assoc with no data
 				 */
 				SCTP_LTRACE_ERR_RET(inp, stcb, net, SCTP_FROM_SCTP_OUTPUT, ENOENT);
 				error = ENOENT;
@@ -12670,7 +12718,7 @@ sctp_lower_sosend(struct socket *so,
 				panic("Error, should hold create lock and I don't?");
 			}
 #endif
-			stcb = sctp_aloc_assoc(inp, addr, &error, 0, vrf_id,
+			stcb = sctp_aloc_assoc(inp, addr, &error, 0, 0, vrf_id,
 			    inp->sctp_ep.pre_open_stream_count,
 			    inp->sctp_ep.port,
 			    p,
@@ -12934,7 +12982,7 @@ sctp_lower_sosend(struct socket *so,
 		free_cnt_applied = 0;
 		/* release this lock, otherwise we hang on ourselves */
 		NET_EPOCH_ENTER(et);
-		sctp_abort_an_association(stcb->sctp_ep, stcb, mm, SCTP_SO_LOCKED);
+		sctp_abort_an_association(stcb->sctp_ep, stcb, mm, false, SCTP_SO_LOCKED);
 		NET_EPOCH_EXIT(et);
 		/* now relock the stcb so everything is sane */
 		hold_tcblock = 0;
@@ -13511,7 +13559,7 @@ dataless_eof:
 					    msg);
 					NET_EPOCH_ENTER(et);
 					sctp_abort_an_association(stcb->sctp_ep, stcb,
-					    op_err, SCTP_SO_LOCKED);
+					    op_err, false, SCTP_SO_LOCKED);
 					NET_EPOCH_EXIT(et);
 					/*
 					 * now relock the stcb so everything

@@ -34,8 +34,7 @@ bc - arbitrary-precision decimal arithmetic language and calculator
 
 # SYNOPSIS
 
-**bc** [**-ghilPqsvVw**] [**--global-stacks**] [**--help**] [**--interactive**] [**--mathlib**] [**--no-prompt**] [**--quiet**] [**--standard**] [**--warn**] [**--version**] [**-e** *expr*] [**--expression**=*expr*...] [**-f** *file*...] [**-file**=*file*...]
-[*file*...]
+**bc** [**-ghilPqRsvVw**] [**-\-global-stacks**] [**-\-help**] [**-\-interactive**] [**-\-mathlib**] [**-\-no-prompt**] [**-\-no-read-prompt**] [**-\-quiet**] [**-\-standard**] [**-\-warn**] [**-\-version**] [**-e** *expr*] [**-\-expression**=*expr*...] [**-f** *file*...] [**-\-file**=*file*...] [*file*...]
 
 # DESCRIPTION
 
@@ -47,16 +46,25 @@ Such differences will be noted in this document.
 After parsing and handling options, this bc(1) reads any files given on the
 command line and executes them before reading from **stdin**.
 
-This bc(1) is a drop-in replacement for *any* bc(1), including (and
-especially) the GNU bc(1).
+This bc(1) is a drop-in replacement for *any* bc(1), including (and especially)
+the GNU bc(1).
+
+**Note**: If running this bc(1) on *any* script meant for another bc(1) gives a
+parse error, it is probably because a word this bc(1) reserves as a keyword is
+used as the name of a function, variable, or array. To fix that, use the
+command-line option **-r** *keyword*, where *keyword* is the keyword that is
+used as a name in the script. For more information, see the **OPTIONS** section.
+
+If parsing scripts meant for other bc(1) implementations still does not work,
+that is a bug and should be reported. See the **BUGS** section.
 
 # OPTIONS
 
 The following are the options that bc(1) accepts.
 
-**-g**, **--global-stacks**
+**-g**, **-\-global-stacks**
 
-    Turns the globals **ibase**, **obase**, and **scale** into stacks.
+:   Turns the globals **ibase**, **obase**, and **scale** into stacks.
 
     This has the effect that a copy of the current value of all three are pushed
     onto a stack for every function call, as well as popped when every function
@@ -107,17 +115,25 @@ The following are the options that bc(1) accepts.
 
     This is a **non-portable extension**.
 
-**-h**, **--help**
+**-h**, **-\-help**
 
 :   Prints a usage message and quits.
 
-**-i**, **--interactive**
+**-i**, **-\-interactive**
 
 :   Forces interactive mode. (See the **INTERACTIVE MODE** section.)
 
     This is a **non-portable extension**.
 
-**-l**, **--mathlib**
+**-L**, **-\-no-line-length**
+
+:   Disables line length checking and prints numbers without backslashes and
+    newlines. In other words, this option sets **BC_LINE_LENGTH** to **0** (see
+    the **ENVIRONMENT VARIABLES** section).
+
+    This is a **non-portable extension**.
+
+**-l**, **-\-mathlib**
 
 :   Sets **scale** (see the **SYNTAX** section) to **20** and loads the included
     math library before running any code, including any expressions or files
@@ -125,75 +141,167 @@ The following are the options that bc(1) accepts.
 
     To learn what is in the library, see the **LIBRARY** section.
 
-**-P**, **--no-prompt**
+**-P**, **-\-no-prompt**
 
 :   Disables the prompt in TTY mode. (The prompt is only enabled in TTY mode.
-    See the **TTY MODE** section) This is mostly for those users that do not
+    See the **TTY MODE** section.) This is mostly for those users that do not
     want a prompt or are not used to having them in bc(1). Most of those users
     would want to put this option in **BC_ENV_ARGS** (see the
     **ENVIRONMENT VARIABLES** section).
 
+    These options override the **BC_PROMPT** and **BC_TTY_MODE** environment
+    variables (see the **ENVIRONMENT VARIABLES** section).
+
     This is a **non-portable extension**.
 
-**-q**, **--quiet**
+**-R**, **-\-no-read-prompt**
+
+:   Disables the read prompt in TTY mode. (The read prompt is only enabled in
+    TTY mode. See the **TTY MODE** section.) This is mostly for those users that
+    do not want a read prompt or are not used to having them in bc(1). Most of
+    those users would want to put this option in **BC_ENV_ARGS** (see the
+    **ENVIRONMENT VARIABLES** section). This option is also useful in hash bang
+    lines of bc(1) scripts that prompt for user input.
+
+    This option does not disable the regular prompt because the read prompt is
+    only used when the **read()** built-in function is called.
+
+    These options *do* override the **BC_PROMPT** and **BC_TTY_MODE**
+    environment variables (see the **ENVIRONMENT VARIABLES** section), but only
+    for the read prompt.
+
+    This is a **non-portable extension**.
+
+**-r** *keyword*, **-\-redefine**=*keyword*
+
+:   Redefines *keyword* in order to allow it to be used as a function, variable,
+    or array name. This is useful when this bc(1) gives parse errors when
+    parsing scripts meant for other bc(1) implementations.
+
+    The keywords this bc(1) allows to be redefined are:
+
+    * **abs**
+    * **asciify**
+    * **continue**
+    * **divmod**
+    * **else**
+    * **halt**
+    * **last**
+    * **limits**
+    * **maxibase**
+    * **maxobase**
+    * **maxscale**
+    * **modexp**
+    * **print**
+    * **read**
+	* **stream**
+
+    If any of those keywords are used as a function, variable, or array name in
+    a script, use this option with the keyword as the argument. If multiple are
+    used, use this option for all of them; it can be used multiple times.
+
+    Keywords are *not* redefined when parsing the builtin math library (see the
+    **LIBRARY** section).
+
+    It is a fatal error to redefine keywords mandated by the POSIX standard. It
+    is a fatal error to attempt to redefine words that this bc(1) does not
+    reserve as keywords.
+
+**-q**, **-\-quiet**
 
 :   This option is for compatibility with the [GNU bc(1)][2]; it is a no-op.
     Without this option, GNU bc(1) prints a copyright header. This bc(1) only
     prints the copyright header if one or more of the **-v**, **-V**, or
-    **--version** options are given.
+    **-\-version** options are given.
 
     This is a **non-portable extension**.
 
-**-s**, **--standard**
+**-s**, **-\-standard**
 
 :   Process exactly the language defined by the [standard][1] and error if any
     extensions are used.
 
     This is a **non-portable extension**.
 
-**-v**, **-V**, **--version**
+**-v**, **-V**, **-\-version**
 
 :   Print the version information (copyright header) and exit.
 
     This is a **non-portable extension**.
 
-**-w**, **--warn**
+**-w**, **-\-warn**
 
-:   Like **-s** and **--standard**, except that warnings (and not errors) are
+:   Like **-s** and **-\-standard**, except that warnings (and not errors) are
     printed for non-standard extensions and execution continues normally.
 
     This is a **non-portable extension**.
 
-**-e** *expr*, **--expression**=*expr*
+**-z**, **-\-leading-zeroes**
+
+:   Makes bc(1) print all numbers greater than **-1** and less than **1**, and
+    not equal to **0**, with a leading zero.
+
+    This can be set for individual numbers with the **plz(x)**, plznl(x)**,
+    **pnlz(x)**, and **pnlznl(x)** functions in the extended math library (see
+    the **LIBRARY** section).
+
+    This is a **non-portable extension**.
+
+**-e** *expr*, **-\-expression**=*expr*
 
 :   Evaluates *expr*. If multiple expressions are given, they are evaluated in
     order. If files are given as well (see below), the expressions and files are
     evaluated in the order given. This means that if a file is given before an
     expression, the file is read in and evaluated first.
 
-    After processing all expressions and files, bc(1) will exit, unless **-**
-    (**stdin**) was given as an argument at least once to **-f** or **--file**.
-    However, if any other **-e**, **--expression**, **-f**, or **--file**
-    arguments are given after that, bc(1) will give a fatal error and exit.
+    If this option is given on the command-line (i.e., not in **BC_ENV_ARGS**,
+    see the **ENVIRONMENT VARIABLES** section), then after processing all
+    expressions and files, bc(1) will exit, unless **-** (**stdin**) was given
+    as an argument at least once to **-f** or **-\-file**, whether on the
+    command-line or in **BC_ENV_ARGS**. However, if any other **-e**,
+    **-\-expression**, **-f**, or **-\-file** arguments are given after **-f-**
+    or equivalent is given, bc(1) will give a fatal error and exit.
 
     This is a **non-portable extension**.
 
-**-f** *file*, **--file**=*file*
+**-f** *file*, **-\-file**=*file*
 
 :   Reads in *file* and evaluates it, line by line, as though it were read
     through **stdin**. If expressions are also given (see above), the
     expressions are evaluated in the order given.
 
-    After processing all expressions and files, bc(1) will exit, unless **-**
-    (**stdin**) was given as an argument at least once to **-f** or **--file**.
+    If this option is given on the command-line (i.e., not in **BC_ENV_ARGS**,
+    see the **ENVIRONMENT VARIABLES** section), then after processing all
+    expressions and files, bc(1) will exit, unless **-** (**stdin**) was given
+    as an argument at least once to **-f** or **-\-file**. However, if any other
+    **-e**, **-\-expression**, **-f**, or **-\-file** arguments are given after
+    **-f-** or equivalent is given, bc(1) will give a fatal error and exit.
 
     This is a **non-portable extension**.
 
 All long options are **non-portable extensions**.
 
+# STDIN
+
+If no files or expressions are given by the **-f**, **-\-file**, **-e**, or
+**-\-expression** options, then bc(1) read from **stdin**.
+
+However, there are a few caveats to this.
+
+First, **stdin** is evaluated a line at a time. The only exception to this is if
+the parse cannot complete. That means that starting a string without ending it
+or starting a function, **if** statement, or loop without ending it will also
+cause bc(1) to not execute.
+
+Second, after an **if** statement, bc(1) doesn't know if an **else** statement
+will follow, so it will not execute until it knows there will not be an **else**
+statement.
+
 # STDOUT
 
-Any non-error output is written to **stdout**.
+Any non-error output is written to **stdout**. In addition, if history (see the
+**HISTORY** section) and the prompt (see the **TTY MODE** section) are enabled,
+both are output to **stdout**.
 
 **Note**: Unlike other bc(1) implementations, this bc(1) will issue a fatal
 error (see the **EXIT STATUS** section) if it cannot write to **stdout**, so if
@@ -237,8 +345,8 @@ Identifiers with more than one character (letter) are a
 
 **ibase** is a global variable determining how to interpret constant numbers. It
 is the "input" base, or the number base used for interpreting input numbers.
-**ibase** is initially **10**. If the **-s** (**--standard**) and **-w**
-(**--warn**) flags were not given on the command line, the max allowable value
+**ibase** is initially **10**. If the **-s** (**-\-standard**) and **-w**
+(**-\-warn**) flags were not given on the command line, the max allowable value
 for **ibase** is **36**. Otherwise, it is **16**. The min allowable value for
 **ibase** is **2**. The max allowable value for **ibase** can be queried in
 bc(1) programs with the **maxibase()** built-in function.
@@ -316,27 +424,51 @@ The following are valid operands in bc(1):
 2.	Array indices (**I[E]**).
 3.	**(E)**: The value of **E** (used to change precedence).
 4.	**sqrt(E)**: The square root of **E**. **E** must be non-negative.
-5.	**length(E)**: The number of significant decimal digits in **E**.
+5.	**length(E)**: The number of significant decimal digits in **E**. Returns
+	**1** for **0** with no decimal places. If given a string, the length of the
+	string is returned. Passing a string to **length(E)** is a **non-portable
+	extension**.
 6.	**length(I[])**: The number of elements in the array **I**. This is a
 	**non-portable extension**.
 7.	**scale(E)**: The *scale* of **E**.
 8.	**abs(E)**: The absolute value of **E**. This is a **non-portable
 	extension**.
-9.	**I()**, **I(E)**, **I(E, E)**, and so on, where **I** is an identifier for
+9.	**modexp(E, E, E)**: Modular exponentiation, where the first expression is
+	the base, the second is the exponent, and the third is the modulus. All
+	three values must be integers. The second argument must be non-negative. The
+	third argument must be non-zero. This is a **non-portable extension**.
+10.	**divmod(E, E, I[])**: Division and modulus in one operation. This is for
+	optimization. The first expression is the dividend, and the second is the
+	divisor, which must be non-zero. The return value is the quotient, and the
+	modulus is stored in index **0** of the provided array (the last argument).
+	This is a **non-portable extension**.
+11.	**asciify(E)**: If **E** is a string, returns a string that is the first
+	letter of its argument. If it is a number, calculates the number mod **256**
+	and returns that number as a one-character string. This is a **non-portable
+	extension**.
+12.	**I()**, **I(E)**, **I(E, E)**, and so on, where **I** is an identifier for
 	a non-**void** function (see the *Void Functions* subsection of the
 	**FUNCTIONS** section). The **E** argument(s) may also be arrays of the form
 	**I[]**, which will automatically be turned into array references (see the
 	*Array References* subsection of the **FUNCTIONS** section) if the
 	corresponding parameter in the function definition is an array reference.
-10.	**read()**: Reads a line from **stdin** and uses that as an expression. The
+13.	**read()**: Reads a line from **stdin** and uses that as an expression. The
 	result of that expression is the result of the **read()** operand. This is a
 	**non-portable extension**.
-11.	**maxibase()**: The max allowable **ibase**. This is a **non-portable
+14.	**maxibase()**: The max allowable **ibase**. This is a **non-portable
 	extension**.
-12.	**maxobase()**: The max allowable **obase**. This is a **non-portable
+15.	**maxobase()**: The max allowable **obase**. This is a **non-portable
 	extension**.
-13.	**maxscale()**: The max allowable **scale**. This is a **non-portable
+16.	**maxscale()**: The max allowable **scale**. This is a **non-portable
 	extension**.
+17.	**line_length()**: The line length set with **BC_LINE_LENGTH** (see the
+	**ENVIRONMENT VARIABLES** section). This is a **non-portable extension**.
+18.	**global_stacks()**: **0** if global stacks are not enabled with the **-g**
+	or **-\-global-stacks** options, non-zero otherwise. See the **OPTIONS**
+	section. This is a **non-portable extension**.
+19.	**leading_zero()**: **0** if leading zeroes are not enabled with the **-z**
+	or **--leading-zeroes** options, non-zero otherwise. See the **OPTIONS**
+	section. This is a **non-portable extension**.
 
 ## Numbers
 
@@ -357,7 +489,7 @@ The following arithmetic and logical operators can be used. They are listed in
 order of decreasing precedence. Operators in the same group have the same
 precedence.
 
-**++** **--**
+**++** **-\-**
 
 :   Type: Prefix and Postfix
 
@@ -431,7 +563,7 @@ precedence.
 
 The operators will be described in more detail below.
 
-**++** **--**
+**++** **-\-**
 
 :   The prefix and postfix **increment** and **decrement** operators behave
     exactly like they would in C. They require a named expression (see the
@@ -556,14 +688,15 @@ The following items are statements:
 12.	**limits**
 13.	A string of characters, enclosed in double quotes
 14.	**print** **E** **,** ... **,** **E**
-15.	**I()**, **I(E)**, **I(E, E)**, and so on, where **I** is an identifier for
+15.	**stream** **E** **,** ... **,** **E**
+16.	**I()**, **I(E)**, **I(E, E)**, and so on, where **I** is an identifier for
 	a **void** function (see the *Void Functions* subsection of the
 	**FUNCTIONS** section). The **E** argument(s) may also be arrays of the form
 	**I[]**, which will automatically be turned into array references (see the
 	*Array References* subsection of the **FUNCTIONS** section) if the
 	corresponding parameter in the function definition is an array reference.
 
-Numbers 4, 9, 11, 12, 14, and 15 are **non-portable extensions**.
+Numbers 4, 9, 11, 12, 14, 15, and 16 are **non-portable extensions**.
 
 Also, as a **non-portable extension**, any or all of the expressions in the
 header of a for loop may be omitted. If the condition (second expression) is
@@ -590,29 +723,67 @@ is like the **quit** statement in that it is a compile-time command.
 
 An expression by itself is evaluated and printed, followed by a newline.
 
+## Strings
+
+If strings appear as a statement by themselves, they are printed without a
+trailing newline.
+
+In addition to appearing as a lone statement by themselves, strings can be
+assigned to variables and array elements. They can also be passed to functions
+in variable parameters.
+
+If any statement that expects a string is given a variable that had a string
+assigned to it, the statement acts as though it had received a string.
+
+If any math operation is attempted on a string or a variable or array element
+that has been assigned a string, an error is raised, and bc(1) resets (see the
+**RESET** section).
+
+Assigning strings to variables and array elements and passing them to functions
+are **non-portable extensions**.
+
 ## Print Statement
 
 The "expressions" in a **print** statement may also be strings. If they are, there
 are backslash escape sequences that are interpreted specially. What those
 sequences are, and what they cause to be printed, are shown below:
 
--------- -------
-**\\a**  **\\a**
-**\\b**  **\\b**
-**\\\\** **\\**
-**\\e**  **\\**
-**\\f**  **\\f**
-**\\n**  **\\n**
-**\\q**  **"**
-**\\r**  **\\r**
-**\\t**  **\\t**
--------- -------
+**\\a**:   **\\a**
+
+**\\b**:   **\\b**
+
+**\\\\**:   **\\**
+
+**\\e**:   **\\**
+
+**\\f**:   **\\f**
+
+**\\n**:   **\\n**
+
+**\\q**:   **"**
+
+**\\r**:   **\\r**
+
+**\\t**:   **\\t**
 
 Any other character following a backslash causes the backslash and character to
 be printed as-is.
 
 Any non-string expression in a print statement shall be assigned to **last**,
 like any other expression that is printed.
+
+## Stream Statement
+
+The "expressions in a **stream** statement may also be strings.
+
+If a **stream** statement is given a string, it prints the string as though the
+string had appeared as its own statement. In other words, the **stream**
+statement prints strings normally, without a newline.
+
+If a **stream** statement is given a number, a copy of it is truncated and its
+absolute value is calculated. The result is then printed as though **obase** is
+**256** and each digit is interpreted as an 8-bit ASCII character, making it a
+byte stream.
 
 ## Order of Evaluation
 
@@ -707,7 +878,7 @@ This is a **non-portable extension**.
 
 # LIBRARY
 
-All of the functions below  are available when the **-l** or **--mathlib**
+All of the functions below  are available when the **-l** or **-\-mathlib**
 command-line flags are given.
 
 ## Standard Library
@@ -920,6 +1091,64 @@ bc(1) recognizes the following environment variables:
     lines to that length, including the backslash (**\\**). The default line
     length is **70**.
 
+    The special value of **0** will disable line length checking and print
+    numbers without regard to line length and without backslashes and newlines.
+
+**BC_BANNER**
+
+:   If this environment variable exists and contains an integer, then a non-zero
+    value activates the copyright banner when bc(1) is in interactive mode,
+    while zero deactivates it.
+
+    If bc(1) is not in interactive mode (see the **INTERACTIVE MODE** section),
+    then this environment variable has no effect because bc(1) does not print
+    the banner when not in interactive mode.
+
+    This environment variable overrides the default, which can be queried with
+    the **-h** or **-\-help** options.
+
+**BC_SIGINT_RESET**
+
+:   If bc(1) is not in interactive mode (see the **INTERACTIVE MODE** section),
+    then this environment variable has no effect because bc(1) exits on
+    **SIGINT** when not in interactive mode.
+
+    However, when bc(1) is in interactive mode, then if this environment
+    variable exists and contains an integer, a non-zero value makes bc(1) reset
+    on **SIGINT**, rather than exit, and zero makes bc(1) exit. If this
+    environment variable exists and is *not* an integer, then bc(1) will exit on
+    **SIGINT**.
+
+    This environment variable overrides the default, which can be queried with
+    the **-h** or **-\-help** options.
+
+**BC_TTY_MODE**
+
+:   If TTY mode is *not* available (see the **TTY MODE** section), then this
+    environment variable has no effect.
+
+    However, when TTY mode is available, then if this environment variable
+    exists and contains an integer, then a non-zero value makes bc(1) use TTY
+    mode, and zero makes bc(1) not use TTY mode.
+
+    This environment variable overrides the default, which can be queried with
+    the **-h** or **-\-help** options.
+
+**BC_PROMPT**
+
+:   If TTY mode is *not* available (see the **TTY MODE** section), then this
+    environment variable has no effect.
+
+    However, when TTY mode is available, then if this environment variable
+    exists and contains an integer, a non-zero value makes bc(1) use a prompt,
+    and zero or a non-integer makes bc(1) not use a prompt. If this environment
+    variable does not exist and **BC_TTY_MODE** does, then the value of the
+    **BC_TTY_MODE** environment variable is used.
+
+    This environment variable and the **BC_TTY_MODE** environment variable
+    override the default, which can be queried with the **-h** or **-\-help**
+    options.
+
 # EXIT STATUS
 
 bc(1) returns the following exit statuses:
@@ -936,8 +1165,9 @@ bc(1) returns the following exit statuses:
 
     Math errors include divide by **0**, taking the square root of a negative
     number, attempting to convert a negative number to a hardware integer,
-    overflow when converting a number to a hardware integer, and attempting to
-    use a non-integer where an integer is required.
+    overflow when converting a number to a hardware integer, overflow when
+    calculating the size of a number, and attempting to use a non-integer where
+    an integer is required.
 
     Converting to a hardware integer happens for the second operand of the power
     (**\^**) operator and the corresponding assignment operator.
@@ -961,11 +1191,12 @@ bc(1) returns the following exit statuses:
 
 :   A runtime error occurred.
 
-    Runtime errors include assigning an invalid number to **ibase**, **obase**,
-    or **scale**; give a bad expression to a **read()** call, calling **read()**
-    inside of a **read()** call, type errors, passing the wrong number of
-    arguments to functions, attempting to call an undefined function, and
-    attempting to use a **void** function call as a value in an expression.
+    Runtime errors include assigning an invalid number to any global (**ibase**,
+    **obase**, or **scale**), giving a bad expression to a **read()** call,
+    calling **read()** inside of a **read()** call, type errors, passing the
+    wrong number of arguments to functions, attempting to call an undefined
+    function, and attempting to use a **void** function call as a value in an
+    expression.
 
 **4**
 
@@ -983,48 +1214,89 @@ The other statuses will only be returned when bc(1) is not in interactive mode
 (see the **INTERACTIVE MODE** section), since bc(1) resets its state (see the
 **RESET** section) and accepts more input when one of those errors occurs in
 interactive mode. This is also the case when interactive mode is forced by the
-**-i** flag or **--interactive** option.
+**-i** flag or **-\-interactive** option.
 
 These exit statuses allow bc(1) to be used in shell scripting with error
 checking, and its normal behavior can be forced by using the **-i** flag or
-**--interactive** option.
+**-\-interactive** option.
 
 # INTERACTIVE MODE
 
 Per the [standard][1], bc(1) has an interactive mode and a non-interactive mode.
 Interactive mode is turned on automatically when both **stdin** and **stdout**
-are hooked to a terminal, but the **-i** flag and **--interactive** option can
-turn it on in other cases.
+are hooked to a terminal, but the **-i** flag and **-\-interactive** option can
+turn it on in other situations.
 
 In interactive mode, bc(1) attempts to recover from errors (see the **RESET**
 section), and in normal execution, flushes **stdout** as soon as execution is
-done for the current input.
+done for the current input. bc(1) may also reset on **SIGINT** instead of exit,
+depending on the contents of, or default for, the **BC_SIGINT_RESET**
+environment variable (see the **ENVIRONMENT VARIABLES** section).
 
 # TTY MODE
 
-If **stdin**, **stdout**, and **stderr** are all connected to a TTY, bc(1) turns
-on "TTY mode."
+If **stdin**, **stdout**, and **stderr** are all connected to a TTY, then "TTY
+mode" is considered to be available, and thus, bc(1) can turn on TTY mode,
+subject to some settings.
 
-TTY mode is required for history to be enabled (see the **COMMAND LINE HISTORY**
-section). It is also required to enable special handling for **SIGINT** signals.
+If there is the environment variable **BC_TTY_MODE** in the environment (see the
+**ENVIRONMENT VARIABLES** section), then if that environment variable contains a
+non-zero integer, bc(1) will turn on TTY mode when **stdin**, **stdout**, and
+**stderr** are all connected to a TTY. If the **BC_TTY_MODE** environment
+variable exists but is *not* a non-zero integer, then bc(1) will not turn TTY
+mode on.
 
-The prompt is enabled in TTY mode.
+If the environment variable **BC_TTY_MODE** does *not* exist, the default
+setting is used. The default setting can be queried with the **-h** or
+**-\-help** options.
 
 TTY mode is different from interactive mode because interactive mode is required
 in the [bc(1) specification][1], and interactive mode requires only **stdin**
 and **stdout** to be connected to a terminal.
 
+## Command-Line History
+
+Command-line history is only enabled if TTY mode is, i.e., that **stdin**,
+**stdout**, and **stderr** are connected to a TTY and the **BC_TTY_MODE**
+environment variable (see the **ENVIRONMENT VARIABLES** section) and its default
+do not disable TTY mode. See the **COMMAND LINE HISTORY** section for more
+information.
+
+## Prompt
+
+If TTY mode is available, then a prompt can be enabled. Like TTY mode itself, it
+can be turned on or off with an environment variable: **BC_PROMPT** (see the
+**ENVIRONMENT VARIABLES** section).
+
+If the environment variable **BC_PROMPT** exists and is a non-zero integer, then
+the prompt is turned on when **stdin**, **stdout**, and **stderr** are connected
+to a TTY and the **-P** and **-\-no-prompt** options were not used. The read
+prompt will be turned on under the same conditions, except that the **-R** and
+**-\-no-read-prompt** options must also not be used.
+
+However, if **BC_PROMPT** does not exist, the prompt can be enabled or disabled
+with the **BC_TTY_MODE** environment variable, the **-P** and **-\-no-prompt**
+options, and the **-R** and **-\-no-read-prompt** options. See the **ENVIRONMENT
+VARIABLES** and **OPTIONS** sections for more details.
+
 # SIGNAL HANDLING
 
-Sending a **SIGINT** will cause bc(1) to stop execution of the current input. If
-bc(1) is in TTY mode (see the **TTY MODE** section), it will reset (see the
-**RESET** section). Otherwise, it will clean up and exit.
+Sending a **SIGINT** will cause bc(1) to do one of two things.
+
+If bc(1) is not in interactive mode (see the **INTERACTIVE MODE** section), or
+the **BC_SIGINT_RESET** environment variable (see the **ENVIRONMENT VARIABLES**
+section), or its default, is either not an integer or it is zero, bc(1) will
+exit.
+
+However, if bc(1) is in interactive mode, and the **BC_SIGINT_RESET** or its
+default is an integer and non-zero, then bc(1) will stop executing the current
+input and reset (see the **RESET** section) upon receiving a **SIGINT**.
 
 Note that "current input" can mean one of two things. If bc(1) is processing
-input from **stdin** in TTY mode, it will ask for more input. If bc(1) is
-processing input from a file in TTY mode, it will stop processing the file and
-start processing the next file, if one exists, or ask for input from **stdin**
-if no other file exists.
+input from **stdin** in interactive mode, it will ask for more input. If bc(1)
+is processing input from a file in interactive mode, it will stop processing the
+file and start processing the next file, if one exists, or ask for input from
+**stdin** if no other file exists.
 
 This means that if a **SIGINT** is sent to bc(1) as it is executing a file, it
 can seem as though bc(1) did not respond to the signal since it will immediately
@@ -1036,14 +1308,22 @@ continue.
 
 **SIGTERM** and **SIGQUIT** cause bc(1) to clean up and exit, and it uses the
 default handler for all other signals. The one exception is **SIGHUP**; in that
-case, when bc(1) is in TTY mode, a **SIGHUP** will cause bc(1) to clean up and
-exit.
+case, and only when bc(1) is in TTY mode (see the **TTY MODE** section), a
+**SIGHUP** will cause bc(1) to clean up and exit.
 
 # COMMAND LINE HISTORY
 
-bc(1) supports interactive command-line editing. If bc(1) is in TTY mode (see
-the **TTY MODE** section), history is enabled. Previous lines can be recalled
-and edited with the arrow keys.
+bc(1) supports interactive command-line editing.
+
+If bc(1) can be in TTY mode (see the **TTY MODE** section), history can be
+enabled. This means that command-line history can only be enabled when
+**stdin**, **stdout**, and **stderr** are all connected to a TTY.
+
+Like TTY mode itself, it can be turned on or off with the environment variable
+**BC_TTY_MODE** (see the **ENVIRONMENT VARIABLES** section).
+
+If history is enabled, previous lines can be recalled and edited with the arrow
+keys.
 
 **Note**: tabs are converted to 8 spaces.
 

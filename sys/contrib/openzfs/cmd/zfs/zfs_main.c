@@ -53,7 +53,6 @@
 #include <grp.h>
 #include <pwd.h>
 #include <signal.h>
-#include <sys/debug.h>
 #include <sys/list.h>
 #include <sys/mkdev.h>
 #include <sys/mntent.h>
@@ -71,7 +70,6 @@
 #include <zfs_prop.h>
 #include <zfs_deleg.h>
 #include <libzutil.h>
-#include <libuutil.h>
 #ifdef HAVE_IDMAP
 #include <aclutils.h>
 #include <directory.h>
@@ -319,7 +317,7 @@ get_usage(zfs_help_t idx)
 	case HELP_SEND:
 		return (gettext("\tsend [-DnPpRvLecwhb] [-[i|I] snapshot] "
 		    "<snapshot>\n"
-		    "\tsend [-nvPLecw] [-i snapshot|bookmark] "
+		    "\tsend [-DnvPLecw] [-i snapshot|bookmark] "
 		    "<filesystem|volume|snapshot>\n"
 		    "\tsend [-DnPpvLec] [-i bookmark|snapshot] "
 		    "--redact <bookmark> <snapshot>\n"
@@ -728,6 +726,32 @@ finish_progress(char *done)
 	}
 	free(pt_header);
 	pt_header = NULL;
+}
+
+/* This function checks if the passed fd refers to /dev/null or /dev/zero */
+#ifdef __linux__
+static boolean_t
+is_dev_nullzero(int fd)
+{
+	struct stat st;
+	fstat(fd, &st);
+	return (major(st.st_rdev) == 1 && (minor(st.st_rdev) == 3 /* null */ ||
+	    minor(st.st_rdev) == 5 /* zero */));
+}
+#endif
+
+static void
+note_dev_error(int err, int fd)
+{
+#ifdef __linux__
+	if (err == EINVAL && is_dev_nullzero(fd)) {
+		(void) fprintf(stderr,
+		    gettext("Error: Writing directly to /dev/{null,zero} files"
+		    " on certain kernels is not currently implemented.\n"
+		    "(As a workaround, "
+		    "try \"zfs send [...] | cat > /dev/null\")\n"));
+	}
+#endif
 }
 
 static int
@@ -4378,6 +4402,7 @@ zfs_do_send(int argc, char **argv)
 
 	struct option long_options[] = {
 		{"replicate",	no_argument,		NULL, 'R'},
+		{"skip-missing",	no_argument,		NULL, 's'},
 		{"redact",	required_argument,	NULL, 'd'},
 		{"props",	no_argument,		NULL, 'p'},
 		{"parsable",	no_argument,		NULL, 'P'},
@@ -4396,7 +4421,7 @@ zfs_do_send(int argc, char **argv)
 	};
 
 	/* check options */
-	while ((c = getopt_long(argc, argv, ":i:I:RDpvnPLeht:cwbd:S",
+	while ((c = getopt_long(argc, argv, ":i:I:RsDpvnPLeht:cwbd:S",
 	    long_options, NULL)) != -1) {
 		switch (c) {
 		case 'i':
@@ -4412,6 +4437,9 @@ zfs_do_send(int argc, char **argv)
 			break;
 		case 'R':
 			flags.replicate = B_TRUE;
+			break;
+		case 's':
+			flags.skipmissing = B_TRUE;
 			break;
 		case 'd':
 			redactbook = optarg;
@@ -4570,11 +4598,23 @@ zfs_do_send(int argc, char **argv)
 
 		err = zfs_send_saved(zhp, &flags, STDOUT_FILENO,
 		    resume_token);
+		if (err != 0)
+			note_dev_error(errno, STDOUT_FILENO);
 		zfs_close(zhp);
 		return (err != 0);
 	} else if (resume_token != NULL) {
-		return (zfs_send_resume(g_zfs, &flags, STDOUT_FILENO,
-		    resume_token));
+		err = zfs_send_resume(g_zfs, &flags, STDOUT_FILENO,
+		    resume_token);
+		if (err != 0)
+			note_dev_error(errno, STDOUT_FILENO);
+		return (err);
+	}
+
+	if (flags.skipmissing && !flags.replicate) {
+		(void) fprintf(stderr,
+		    gettext("skip-missing flag can only be used in "
+		    "conjunction with replicate\n"));
+		usage(B_FALSE);
 	}
 
 	/*
@@ -4618,6 +4658,8 @@ zfs_do_send(int argc, char **argv)
 		err = zfs_send_one(zhp, fromname, STDOUT_FILENO, &flags,
 		    redactbook);
 		zfs_close(zhp);
+		if (err != 0)
+			note_dev_error(errno, STDOUT_FILENO);
 		return (err != 0);
 	}
 
@@ -4694,6 +4736,7 @@ zfs_do_send(int argc, char **argv)
 		nvlist_free(dbgnv);
 	}
 	zfs_close(zhp);
+	note_dev_error(errno, STDOUT_FILENO);
 
 	return (err != 0);
 }
@@ -6911,9 +6954,6 @@ report_mount_progress(int current, int total)
 	static time_t last_progress_time = 0;
 	time_t now = time(NULL);
 	char info[32];
-
-	/* report 1..n instead of 0..n-1 */
-	++current;
 
 	/* display header if we're here for the first time */
 	if (current == 1) {

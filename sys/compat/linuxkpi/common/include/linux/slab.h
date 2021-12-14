@@ -2,7 +2,7 @@
  * Copyright (c) 2010 Isilon Systems, Inc.
  * Copyright (c) 2010 iX Systems, Inc.
  * Copyright (c) 2010 Panasas, Inc.
- * Copyright (c) 2013-2017 Mellanox Technologies, Ltd.
+ * Copyright (c) 2013-2021 Mellanox Technologies, Ltd.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,13 +31,11 @@
 #ifndef	_LINUX_SLAB_H_
 #define	_LINUX_SLAB_H_
 
-#include <sys/param.h>
-#include <sys/systm.h>
+#include <sys/types.h>
 #include <sys/malloc.h>
 #include <sys/limits.h>
-#include <sys/proc.h>
-#include <vm/uma.h>
 
+#include <linux/compat.h>
 #include <linux/types.h>
 #include <linux/gfp.h>
 #include <linux/llist.h>
@@ -48,16 +46,15 @@ MALLOC_DECLARE(M_KMALLOC);
 #define	kvzalloc(size, flags)		kmalloc(size, (flags) | __GFP_ZERO)
 #define	kvcalloc(n, size, flags)	kvmalloc_array(n, size, (flags) | __GFP_ZERO)
 #define	kzalloc(size, flags)		kmalloc(size, (flags) | __GFP_ZERO)
-#define	kzalloc_node(size, flags, node)	kmalloc(size, (flags) | __GFP_ZERO)
+#define	kzalloc_node(size, flags, node)	kmalloc_node(size, (flags) | __GFP_ZERO, node)
 #define	kfree_const(ptr)		kfree(ptr)
 #define	vzalloc(size)			__vmalloc(size, GFP_KERNEL | __GFP_NOWARN | __GFP_ZERO, 0)
 #define	vfree(arg)			kfree(arg)
 #define	kvfree(arg)			kfree(arg)
-#define	vmalloc_node(size, node)	__vmalloc(size, GFP_KERNEL, 0)
+#define	vmalloc_node(size, node)	__vmalloc_node(size, GFP_KERNEL, node)
 #define	vmalloc_user(size)		__vmalloc(size, GFP_KERNEL | __GFP_ZERO, 0)
 #define	vmalloc(size)			__vmalloc(size, GFP_KERNEL, 0)
 #define	__kmalloc(...)			kmalloc(__VA_ARGS__)
-#define	kmalloc_node(chunk, flags, n)	kmalloc(chunk, flags)
 
 /*
  * Prefix some functions with linux_ to avoid namespace conflict
@@ -65,8 +62,9 @@ MALLOC_DECLARE(M_KMALLOC);
  */
 #define	kmem_cache		linux_kmem_cache
 #define	kmem_cache_create(...)	linux_kmem_cache_create(__VA_ARGS__)
-#define	kmem_cache_alloc(...)	linux_kmem_cache_alloc(__VA_ARGS__)
-#define	kmem_cache_free(...)	linux_kmem_cache_free(__VA_ARGS__)
+#define	kmem_cache_alloc(...)	lkpi_kmem_cache_alloc(__VA_ARGS__)
+#define	kmem_cache_zalloc(...)	lkpi_kmem_cache_zalloc(__VA_ARGS__)
+#define	kmem_cache_free(...)	lkpi_kmem_cache_free(__VA_ARGS__)
 #define	kmem_cache_destroy(...) linux_kmem_cache_destroy(__VA_ARGS__)
 
 #define	KMEM_CACHE(__struct, flags)					\
@@ -75,12 +73,7 @@ MALLOC_DECLARE(M_KMALLOC);
 
 typedef void linux_kmem_ctor_t (void *);
 
-struct linux_kmem_cache {
-	uma_zone_t cache_zone;
-	linux_kmem_ctor_t *cache_ctor;
-	unsigned cache_flags;
-	unsigned cache_size;
-};
+struct linux_kmem_cache;
 
 #define	SLAB_HWCACHE_ALIGN	(1 << 0)
 #define	SLAB_TYPESAFE_BY_RCU	(1 << 1)
@@ -127,6 +120,13 @@ kmalloc(size_t size, gfp_t flags)
 }
 
 static inline void *
+kmalloc_node(size_t size, gfp_t flags, int node)
+{
+	return (malloc_domainset(size, M_KMALLOC,
+	    linux_get_vm_domain_set(node), linux_check_m_flags(flags)));
+}
+
+static inline void *
 kcalloc(size_t n, size_t size, gfp_t flags)
 {
 	flags |= __GFP_ZERO;
@@ -134,9 +134,24 @@ kcalloc(size_t n, size_t size, gfp_t flags)
 }
 
 static inline void *
+kcalloc_node(size_t n, size_t size, gfp_t flags, int node)
+{
+	flags |= __GFP_ZERO;
+	return (mallocarray_domainset(n, size, M_KMALLOC,
+	    linux_get_vm_domain_set(node), linux_check_m_flags(flags)));
+}
+
+static inline void *
 __vmalloc(size_t size, gfp_t flags, int other)
 {
 	return (malloc(size, M_KMALLOC, linux_check_m_flags(flags)));
+}
+
+static inline void *
+__vmalloc_node(size_t size, gfp_t flags, int node)
+{
+	return (malloc_domainset(size, M_KMALLOC,
+	    linux_get_vm_domain_set(node), linux_check_m_flags(flags)));
 }
 
 static inline void *
@@ -149,6 +164,13 @@ static inline void *
 kmalloc_array(size_t n, size_t size, gfp_t flags)
 {
 	return (mallocarray(n, size, M_KMALLOC, linux_check_m_flags(flags)));
+}
+
+static inline void *
+kmalloc_array_node(size_t n, size_t size, gfp_t flags, int node)
+{
+	return (mallocarray_domainset(n, size, M_KMALLOC,
+	    linux_get_vm_domain_set(node), linux_check_m_flags(flags)));
 }
 
 static inline void *
@@ -169,6 +191,12 @@ kfree(const void *ptr)
 	free(__DECONST(void *, ptr), M_KMALLOC);
 }
 
+static __inline void
+kfree_sensitive(const void *ptr)
+{
+	zfree(__DECONST(void *, ptr), M_KMALLOC);
+}
+
 static inline size_t
 ksize(const void *ptr)
 {
@@ -177,33 +205,12 @@ ksize(const void *ptr)
 
 extern struct linux_kmem_cache *linux_kmem_cache_create(const char *name,
     size_t size, size_t align, unsigned flags, linux_kmem_ctor_t *ctor);
-
-static inline void *
-linux_kmem_cache_alloc(struct linux_kmem_cache *c, gfp_t flags)
-{
-	return (uma_zalloc_arg(c->cache_zone, c,
-	    linux_check_m_flags(flags)));
-}
-
-static inline void *
-kmem_cache_zalloc(struct linux_kmem_cache *c, gfp_t flags)
-{
-	return (uma_zalloc_arg(c->cache_zone, c,
-	    linux_check_m_flags(flags | M_ZERO)));
-}
-
-extern void linux_kmem_cache_free_rcu(struct linux_kmem_cache *, void *);
-
-static inline void
-linux_kmem_cache_free(struct linux_kmem_cache *c, void *m)
-{
-	if (unlikely(c->cache_flags & SLAB_TYPESAFE_BY_RCU))
-		linux_kmem_cache_free_rcu(c, m);
-	else
-		uma_zfree(c->cache_zone, m);
-}
-
+extern void *lkpi_kmem_cache_alloc(struct linux_kmem_cache *, gfp_t);
+extern void *lkpi_kmem_cache_zalloc(struct linux_kmem_cache *, gfp_t);
+extern void lkpi_kmem_cache_free(struct linux_kmem_cache *, void *);
 extern void linux_kmem_cache_destroy(struct linux_kmem_cache *);
 void linux_kfree_async(void *);
+void linux_kmem_cache_free_rcu_callback(struct rcu_head *head);
+void linux_kmem_cache_free_rcu(struct linux_kmem_cache *, void *);
 
 #endif					/* _LINUX_SLAB_H_ */

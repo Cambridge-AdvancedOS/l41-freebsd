@@ -783,8 +783,8 @@ intr_handler_barrier(struct intr_handler *handler)
  * Sleep until an ithread finishes executing an interrupt handler.
  *
  * XXX Doesn't currently handle interrupt filters or fast interrupt
- * handlers.  This is intended for compatibility with linux drivers
- * only.  Do not use in BSD code.
+ * handlers. This is intended for LinuxKPI drivers only.
+ * Do not use in BSD code.
  */
 void
 _intr_drain(int irq)
@@ -1612,7 +1612,7 @@ sysctl_intrnames(SYSCTL_HANDLER_ARGS)
 }
 
 SYSCTL_PROC(_hw, OID_AUTO, intrnames,
-    CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_NEEDGIANT, NULL, 0,
+    CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     sysctl_intrnames, "",
     "Interrupt Names");
 
@@ -1641,7 +1641,7 @@ sysctl_intrcnt(SYSCTL_HANDLER_ARGS)
 }
 
 SYSCTL_PROC(_hw, OID_AUTO, intrcnt,
-    CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_NEEDGIANT, NULL, 0,
+    CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     sysctl_intrcnt, "",
     "Interrupt Counts");
 

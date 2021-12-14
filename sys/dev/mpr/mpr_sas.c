@@ -237,7 +237,6 @@ mprsas_alloc_tm(struct mpr_softc *sc)
 void
 mprsas_free_tm(struct mpr_softc *sc, struct mpr_command *tm)
 {
-	int target_id = 0xFFFFFFFF;
 
 	MPR_FUNCTRACE(sc);
 	if (tm == NULL)
@@ -248,13 +247,11 @@ mprsas_free_tm(struct mpr_softc *sc, struct mpr_command *tm)
 	 * free the resources used for freezing the devq.  Must clear the
 	 * INRESET flag as well or scsi I/O will not work.
 	 */
-	if (tm->cm_targ != NULL) {
-		tm->cm_targ->flags &= ~MPRSAS_TARGET_INRESET;
-		target_id = tm->cm_targ->tid;
-	}
 	if (tm->cm_ccb) {
-		mpr_dprint(sc, MPR_INFO, "Unfreezing devq for target ID %d\n",
-		    target_id);
+		mpr_dprint(sc, MPR_XINFO | MPR_RECOVERY,
+		    "Unfreezing devq for target ID %d\n",
+		    tm->cm_targ->tid);
+		tm->cm_targ->flags &= ~MPRSAS_TARGET_INRESET;
 		xpt_release_devq(tm->cm_ccb->ccb_h.path, 1, TRUE);
 		xpt_free_path(tm->cm_ccb->ccb_h.path);
 		xpt_free_ccb(tm->cm_ccb);
@@ -413,6 +410,34 @@ mprsas_remove_volume(struct mpr_softc *sc, struct mpr_command *tm)
 }
 
 /*
+ * Retry mprsas_prepare_remove() if some previous attempt failed to allocate
+ * high priority command due to limit reached.
+ */
+void
+mprsas_prepare_remove_retry(struct mprsas_softc *sassc)
+{
+	struct mprsas_target *target;
+	int i;
+
+	if ((sassc->flags & MPRSAS_TOREMOVE) == 0)
+		return;
+
+	for (i = 0; i < sassc->maxtargets; i++) {
+		target = &sassc->targets[i];
+		if ((target->flags & MPRSAS_TARGET_TOREMOVE) == 0)
+			continue;
+		if (TAILQ_EMPTY(&sassc->sc->high_priority_req_list))
+			return;
+		target->flags &= ~MPRSAS_TARGET_TOREMOVE;
+		if (target->flags & MPR_TARGET_FLAGS_VOLUME)
+			mprsas_prepare_volume_remove(sassc, target->handle);
+		else
+			mprsas_prepare_remove(sassc, target->handle);
+	}
+	sassc->flags &= ~MPRSAS_TOREMOVE;
+}
+
+/*
  * No Need to call "MPI2_SAS_OP_REMOVE_DEVICE" For Volume removal.
  * Otherwise Volume Delete is same as Bare Drive Removal.
  */
@@ -440,8 +465,8 @@ mprsas_prepare_volume_remove(struct mprsas_softc *sassc, uint16_t handle)
 
 	cm = mprsas_alloc_tm(sc);
 	if (cm == NULL) {
-		mpr_dprint(sc, MPR_ERROR,
-		    "%s: command alloc failure\n", __func__);
+		targ->flags |= MPRSAS_TARGET_TOREMOVE;
+		sassc->flags |= MPRSAS_TOREMOVE;
 		return;
 	}
 
@@ -506,8 +531,8 @@ mprsas_prepare_remove(struct mprsas_softc *sassc, uint16_t handle)
 
 	tm = mprsas_alloc_tm(sc);
 	if (tm == NULL) {
-		mpr_dprint(sc, MPR_ERROR, "%s: command alloc failure\n",
-		    __func__);
+		targ->flags |= MPRSAS_TARGET_TOREMOVE;
+		sassc->flags |= MPRSAS_TOREMOVE;
 		return;
 	}
 
@@ -797,6 +822,8 @@ mpr_attach_sas(struct mpr_softc *sc)
 
 	callout_init(&sassc->discovery_callout, 1 /*mpsafe*/);
 
+	mpr_unlock(sc);
+
 	/*
 	 * Register for async events so we can determine the EEDP
 	 * capabilities of devices.
@@ -811,7 +838,7 @@ mpr_attach_sas(struct mpr_softc *sc)
 	} else {
 		int event;
 
-		event = AC_ADVINFO_CHANGED | AC_FOUND_DEVICE;
+		event = AC_ADVINFO_CHANGED;
 		status = xpt_register_async(event, mprsas_async, sc,
 					    sassc->path);
 
@@ -830,8 +857,6 @@ mpr_attach_sas(struct mpr_softc *sc)
 		 */
 		mpr_printf(sc, "EEDP capabilities disabled.\n");
 	}
-
-	mpr_unlock(sc);
 
 	mprsas_register_events(sc);
 out:
@@ -866,18 +891,18 @@ mpr_detach_sas(struct mpr_softc *sc)
 	if (sassc->ev_tq != NULL)
 		taskqueue_free(sassc->ev_tq);
 
-	/* Make sure CAM doesn't wedge if we had to bail out early. */
-	mpr_lock(sc);
-
-	while (sassc->startup_refcount != 0)
-		mprsas_startup_decrement(sassc);
-
 	/* Deregister our async handler */
 	if (sassc->path != NULL) {
 		xpt_register_async(0, mprsas_async, sc, sassc->path);
 		xpt_free_path(sassc->path);
 		sassc->path = NULL;
 	}
+
+	/* Make sure CAM doesn't wedge if we had to bail out early. */
+	mpr_lock(sc);
+
+	while (sassc->startup_refcount != 0)
+		mprsas_startup_decrement(sassc);
 
 	if (sassc->flags & MPRSAS_IN_STARTUP)
 		xpt_release_simq(sassc->sim, 1);
@@ -1194,7 +1219,7 @@ mprsas_tm_timeout(void *data)
 	    "out\n", tm);
 
 	KASSERT(tm->cm_state == MPR_CM_STATE_INQUEUE,
-	    ("command not inqueue\n"));
+	    ("command not inqueue, state = %u\n", tm->cm_state));
 
 	tm->cm_state = MPR_CM_STATE_BUSY;
 	mpr_reinit(sc);
@@ -1895,12 +1920,13 @@ mprsas_action_scsiio(struct mprsas_softc *sassc, union ccb *ccb)
 	}
 
 	/*
-	 * If target has a reset in progress, freeze the devq and return.  The
-	 * devq will be released when the TM reset is finished.
+	 * If target has a reset in progress, the devq should be frozen.
+	 * Geting here we likely hit a race, so just requeue.
 	 */
 	if (targ->flags & MPRSAS_TARGET_INRESET) {
-		ccb->ccb_h.status = CAM_BUSY | CAM_DEV_QFRZN;
-		mpr_dprint(sc, MPR_INFO, "%s: Freezing devq for target ID %d\n",
+		ccb->ccb_h.status = CAM_REQUEUE_REQ | CAM_DEV_QFRZN;
+		mpr_dprint(sc, MPR_XINFO | MPR_RECOVERY,
+		    "%s: Freezing devq for target ID %d\n",
 		    __func__, targ->tid);
 		xpt_freeze_devq(ccb->ccb_h.path, 1);
 		xpt_done(ccb);
@@ -2034,7 +2060,7 @@ mprsas_action_scsiio(struct mprsas_softc *sassc, union ccb *ccb)
 		}
 
 		if ((lun != NULL) && (lun->eedp_formatted)) {
-			req->EEDPBlockSize = htole16(lun->eedp_block_size);
+			req->EEDPBlockSize = htole32(lun->eedp_block_size);
 			eedp_flags |= (MPI2_SCSIIO_EEDPFLAGS_INC_PRI_REFTAG |
 			    MPI2_SCSIIO_EEDPFLAGS_CHECK_REFTAG |
 			    MPI2_SCSIIO_EEDPFLAGS_CHECK_GUARD);
@@ -2400,10 +2426,6 @@ mprsas_scsiio_complete(struct mpr_softc *sc, struct mpr_command *cm)
 	target_id_t target_id;
 
 	MPR_FUNCTRACE(sc);
-	mpr_dprint(sc, MPR_TRACE,
-	    "cm %p SMID %u ccb %p reply %p outstanding %u\n", cm,
-	    cm->cm_desc.Default.SMID, cm->cm_ccb, cm->cm_reply,
-	    cm->cm_targ->outstanding);
 
 	callout_stop(&cm->cm_callout);
 	mtx_assert(&sc->mpr_mtx, MA_OWNED);
@@ -2413,6 +2435,12 @@ mprsas_scsiio_complete(struct mpr_softc *sc, struct mpr_command *cm)
 	csio = &ccb->csio;
 	target_id = csio->ccb_h.target_id;
 	rep = (MPI2_SCSI_IO_REPLY *)cm->cm_reply;
+	mpr_dprint(sc, MPR_TRACE,
+	    "cm %p SMID %u ccb %p reply %p outstanding %u csio->scsi_status 0x%x,"
+	    "csio->dxfer_len 0x%x, csio->msg_le 0x%xn\n", cm,
+	    cm->cm_desc.Default.SMID, cm->cm_ccb, cm->cm_reply,
+	    cm->cm_targ->outstanding, csio->scsi_status,
+	    csio->dxfer_len, csio->msg_len);
 	/*
 	 * XXX KDM if the chain allocation fails, does it matter if we do
 	 * the sync and unload here?  It is simpler to do it in every case,
@@ -2435,7 +2463,7 @@ mprsas_scsiio_complete(struct mpr_softc *sc, struct mpr_command *cm)
 	if (cm->cm_flags & MPR_CM_FLAGS_ON_RECOVERY) {
 		TAILQ_REMOVE(&cm->cm_targ->timedout_commands, cm, cm_recovery);
 		KASSERT(cm->cm_state == MPR_CM_STATE_BUSY,
-		    ("Not busy for CM_FLAGS_TIMEDOUT: %d\n", cm->cm_state));
+		    ("Not busy for CM_FLAGS_TIMEDOUT: %u\n", cm->cm_state));
 		cm->cm_flags &= ~MPR_CM_FLAGS_ON_RECOVERY;
 		if (cm->cm_reply != NULL)
 			mprsas_log_command(cm, MPR_RECOVERY,
@@ -2489,8 +2517,8 @@ mprsas_scsiio_complete(struct mpr_softc *sc, struct mpr_command *cm)
 		if ((sassc->flags & MPRSAS_QUEUE_FROZEN) == 0) {
 			xpt_freeze_simq(sassc->sim, 1);
 			sassc->flags |= MPRSAS_QUEUE_FROZEN;
-			mpr_dprint(sc, MPR_XINFO, "Error sending command, "
-			    "freezing SIM queue\n");
+			mpr_dprint(sc, MPR_XINFO | MPR_RECOVERY,
+			    "Error sending command, freezing SIM queue\n");
 		}
 	}
 
@@ -2525,7 +2553,7 @@ mprsas_scsiio_complete(struct mpr_softc *sc, struct mpr_command *cm)
 			if (sassc->flags & MPRSAS_QUEUE_FROZEN) {
 				ccb->ccb_h.status |= CAM_RELEASE_SIMQ;
 				sassc->flags &= ~MPRSAS_QUEUE_FROZEN;
-				mpr_dprint(sc, MPR_XINFO,
+				mpr_dprint(sc, MPR_XINFO | MPR_RECOVERY,
 				    "Unfreezing SIM queue\n");
 			}
 		} 
@@ -2793,7 +2821,7 @@ mprsas_scsiio_complete(struct mpr_softc *sc, struct mpr_command *cm)
 	if (sassc->flags & MPRSAS_QUEUE_FROZEN) {
 		ccb->ccb_h.status |= CAM_RELEASE_SIMQ;
 		sassc->flags &= ~MPRSAS_QUEUE_FROZEN;
-		mpr_dprint(sc, MPR_XINFO, "Command completed, unfreezing SIM "
+		mpr_dprint(sc, MPR_INFO, "Command completed, unfreezing SIM "
 		    "queue\n");
 	}
 
@@ -3302,6 +3330,7 @@ mprsas_async(void *callback_arg, uint32_t code, struct cam_path *path,
 
 	sc = (struct mpr_softc *)callback_arg;
 
+	mpr_lock(sc);
 	switch (code) {
 	case AC_ADVINFO_CHANGED: {
 		struct mprsas_target *target;
@@ -3388,18 +3417,22 @@ mprsas_async(void *callback_arg, uint32_t code, struct cam_path *path,
 		}
 		break;
 	}
-	case AC_FOUND_DEVICE:
 	default:
 		break;
 	}
+	mpr_unlock(sc);
 }
 
 /*
- * Set the INRESET flag for this target so that no I/O will be sent to
- * the target until the reset has completed.  If an I/O request does
- * happen, the devq will be frozen.  The CCB holds the path which is
- * used to release the devq.  The devq is released and the CCB is freed
+ * Freeze the devq and set the INRESET flag so that no I/O will be sent to
+ * the target until the reset has completed.  The CCB holds the path which
+ * is used to release the devq.  The devq is released and the CCB is freed
  * when the TM completes.
+ * We only need to do this when we're entering reset, not at each time we
+ * need to send an abort (which will happen if multiple commands timeout
+ * while we're sending the abort). We do not release the queue for each
+ * command we complete (just at the end when we free the tm), so freezing
+ * it each time doesn't make sense.
  */
 void
 mprsas_prepare_for_tm(struct mpr_softc *sc, struct mpr_command *tm,
@@ -3417,7 +3450,13 @@ mprsas_prepare_for_tm(struct mpr_softc *sc, struct mpr_command *tm,
 		} else {
 			tm->cm_ccb = ccb;
 			tm->cm_targ = target;
-			target->flags |= MPRSAS_TARGET_INRESET;
+			if ((target->flags & MPRSAS_TARGET_INRESET) == 0) {
+				mpr_dprint(sc, MPR_XINFO | MPR_RECOVERY,
+				    "%s: Freezing devq for target ID %d\n",
+				    __func__, target->tid);
+				xpt_freeze_devq(ccb->ccb_h.path, 1);
+				target->flags |= MPRSAS_TARGET_INRESET;
+			}
 		}
 	}
 }
@@ -3483,7 +3522,7 @@ mprsas_portenable_complete(struct mpr_softc *sc, struct mpr_command *cm)
 	reply = (MPI2_PORT_ENABLE_REPLY *)cm->cm_reply;
 	if (reply == NULL)
 		mpr_dprint(sc, MPR_FAULT, "Portenable NULL reply\n");
-	else if (le16toh(reply->IOCStatus & MPI2_IOCSTATUS_MASK) !=
+	else if ((le16toh(reply->IOCStatus) & MPI2_IOCSTATUS_MASK) !=
 	    MPI2_IOCSTATUS_SUCCESS)
 		mpr_dprint(sc, MPR_FAULT, "Portenable failed\n");
 

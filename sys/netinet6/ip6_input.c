@@ -386,10 +386,11 @@ ip6_destroy(void *unused __unused)
 		/* IF_ADDR_UNLOCK(ifp); */
 		in6_ifdetach_destroy(ifp);
 		mld_domifdetach(ifp);
-		/* Make sure any routes are gone as well. */
-		rt_flushifroutes_af(ifp, AF_INET6);
 	}
 	IFNET_RUNLOCK();
+
+	/* Make sure any routes are gone as well. */
+	rib_flush_routes_family(AF_INET6);
 
 	frag6_destroy();
 	nd6_destroy();
@@ -803,7 +804,7 @@ passin:
 	 * XXX: For now we keep link-local IPv6 addresses with embedded
 	 *      scope zone id, therefore we use zero zoneid here.
 	 */
-	ia = in6ifa_ifwithaddr(&ip6->ip6_dst, 0 /* XXX */);
+	ia = in6ifa_ifwithaddr(&ip6->ip6_dst, 0 /* XXX */, false);
 	if (ia != NULL) {
 		if (ia->ia6_flags & IN6_IFF_NOTREADY) {
 			char ip6bufs[INET6_ADDRSTRLEN];
@@ -813,13 +814,11 @@ passin:
 			    "ip6_input: packet to an unready address %s->%s\n",
 			    ip6_sprintf(ip6bufs, &ip6->ip6_src),
 			    ip6_sprintf(ip6bufd, &ip6->ip6_dst)));
-			ifa_free(&ia->ia_ifa);
 			goto bad;
 		}
 		/* Count the packet in the ip address stats */
 		counter_u64_add(ia->ia_ifa.ifa_ipackets, 1);
 		counter_u64_add(ia->ia_ifa.ifa_ibytes, m->m_pkthdr.len);
-		ifa_free(&ia->ia_ifa);
 		ours = 1;
 		goto hbhcheck;
 	}
@@ -1576,6 +1575,7 @@ ip6_notify_pmtu(struct inpcb *inp, struct sockaddr_in6 *dst, u_int32_t mtu)
 	so =  inp->inp_socket;
 	if (sbappendaddr(&so->so_rcv, (struct sockaddr *)dst, NULL, m_mtu)
 	    == 0) {
+		soroverflow(so);
 		m_freem(m_mtu);
 		/* XXX: should count statistics */
 	} else

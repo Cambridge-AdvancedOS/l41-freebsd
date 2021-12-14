@@ -738,6 +738,7 @@ ns8250_bus_ipend(struct uart_softc *sc)
 	} else {
 		if (iir & IIR_TXRDY) {
 			ipend |= SER_INT_TXIDLE;
+			ns8250->ier &= ~IER_ETXRDY;
 			uart_setreg(bas, REG_IER, ns8250->ier);
 			uart_barrier(bas);
 		} else
@@ -790,13 +791,11 @@ ns8250_bus_param(struct uart_softc *sc, int baudrate, int databits,
 int
 ns8250_bus_probe(struct uart_softc *sc)
 {
-	struct ns8250_softc *ns8250;
 	struct uart_bas *bas;
 	int count, delay, error, limit;
 	uint8_t lsr, mcr, ier;
 	uint8_t val;
 
-	ns8250 = (struct ns8250_softc *)sc;
 	bas = &sc->sc_bas;
 
 	error = ns8250_probe(bas);
@@ -891,7 +890,8 @@ ns8250_bus_probe(struct uart_softc *sc)
 		    --limit)
 			DELAY(delay);
 		if (limit == 0) {
-			ier = uart_getreg(bas, REG_IER) & ns8250->ier_mask;
+			/* See the comment in ns8250_init(). */
+			ier = uart_getreg(bas, REG_IER) & 0xe0;
 			uart_setreg(bas, REG_IER, ier);
 			uart_setreg(bas, REG_MCR, mcr);
 			val = 0;
@@ -1035,7 +1035,9 @@ ns8250_bus_transmit(struct uart_softc *sc)
 		uart_setreg(bas, REG_DATA, sc->sc_txbuf[i]);
 		uart_barrier(bas);
 	}
-	uart_setreg(bas, REG_IER, ns8250->ier | IER_ETXRDY);
+	if (!broken_txfifo)
+		ns8250->ier |= IER_ETXRDY;
+	uart_setreg(bas, REG_IER, ns8250->ier);
 	uart_barrier(bas);
 	if (broken_txfifo)
 		ns8250_drain(bas, UART_DRAIN_TRANSMITTER);

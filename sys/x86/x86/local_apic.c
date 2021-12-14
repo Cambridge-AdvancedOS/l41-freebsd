@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/asan.h>
 #include <sys/bus.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
@@ -193,7 +194,7 @@ static u_int32_t lapic_timer_divisors[] = {
 extern inthand_t IDTVEC(rsvd_pti), IDTVEC(rsvd);
 
 volatile char *lapic_map;
-vm_paddr_t lapic_paddr;
+vm_paddr_t lapic_paddr = DEFAULT_APIC_BASE;
 int x2apic_mode;
 int lapic_eoi_suppression;
 static int lapic_timer_tsc_deadline;
@@ -1299,6 +1300,9 @@ lapic_handle_intr(int vector, struct trapframe *frame)
 {
 	struct intsrc *isrc;
 
+	/* The frame may have been written into a poisoned region. */
+	kasan_mark(frame, sizeof(*frame), sizeof(*frame), 0);
+
 	isrc = intr_lookup_source(apic_idt_to_irq(PCPU_GET(apic_id),
 	    vector));
 	intr_execute_handlers(isrc, frame);
@@ -1313,6 +1317,9 @@ lapic_handle_timer(struct trapframe *frame)
 
 	/* Send EOI first thing. */
 	lapic_eoi();
+
+	/* The frame may have been written into a poisoned region. */
+	kasan_mark(frame, sizeof(*frame), sizeof(*frame), 0);
 
 #if defined(SMP) && !defined(SCHED_ULE)
 	/*
@@ -2143,6 +2150,9 @@ native_lapic_ipi_alloc(inthand_t *ipifunc)
 	for (idx = IPI_DYN_FIRST; idx <= IPI_DYN_LAST; idx++) {
 		ip = &idt[idx];
 		func = (ip->gd_hioffset << 16) | ip->gd_looffset;
+#ifdef __i386__
+		func -= setidt_disp;
+#endif
 		if ((!pti && func == (uintptr_t)&IDTVEC(rsvd)) ||
 		    (pti && func == (uintptr_t)&IDTVEC(rsvd_pti))) {
 			vector = idx;
@@ -2166,6 +2176,9 @@ native_lapic_ipi_free(int vector)
 	mtx_lock_spin(&icu_lock);
 	ip = &idt[vector];
 	func = (ip->gd_hioffset << 16) | ip->gd_looffset;
+#ifdef __i386__
+	func -= setidt_disp;
+#endif
 	KASSERT(func != (uintptr_t)&IDTVEC(rsvd) &&
 	    func != (uintptr_t)&IDTVEC(rsvd_pti),
 	    ("invalid idtfunc %#lx", func));

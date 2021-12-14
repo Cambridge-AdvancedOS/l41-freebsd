@@ -352,7 +352,7 @@ toe_syncache_add(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 
 	INP_WLOCK_ASSERT(inp);
 
-	syncache_add(inc, to, th, inp, &lso, NULL, tod, todctx, iptos);
+	syncache_add(inc, to, th, inp, &lso, NULL, tod, todctx, iptos, htons(0));
 }
 
 int
@@ -362,7 +362,7 @@ toe_syncache_expand(struct in_conninfo *inc, struct tcpopt *to,
 
 	NET_EPOCH_ASSERT();
 
-	return (syncache_expand(inc, to, th, lsop, NULL));
+	return (syncache_expand(inc, to, th, lsop, NULL, htons(0)));
 }
 
 /*
@@ -474,7 +474,8 @@ toe_l2_resolve(struct toedev *tod, struct ifnet *ifp, struct sockaddr *sa,
 #endif
 #ifdef INET6
 	case AF_INET6:
-		rc = nd6_resolve(ifp, 0, NULL, sa, lladdr, NULL, NULL);
+		rc = nd6_resolve(ifp, LLE_SF(AF_INET6, 0), NULL, sa, lladdr,
+		    NULL, NULL);
 		break;
 #endif
 	default:

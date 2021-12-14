@@ -120,6 +120,7 @@ SUBDIR=	\
 	fdc \
 	fdescfs \
 	${_ffec} \
+	${_fib_dxr} \
 	filemon \
 	firewire \
 	firmware \
@@ -164,8 +165,8 @@ SUBDIR=	\
 	if_tuntap \
 	if_vlan \
 	if_vxlan \
-	if_wg \
 	iflib \
+	${_igc} \
 	${_iir} \
 	imgact_binmisc \
 	${_intelspi} \
@@ -333,6 +334,7 @@ SUBDIR=	\
 	${_sctp} \
 	sdhci \
 	${_sdhci_acpi} \
+	${_sdhci_fdt} \
 	sdhci_pci \
 	sdio \
 	sem \
@@ -477,6 +479,7 @@ _ipfilter=	ipfilter
 
 .if ${MK_INET_SUPPORT} != "no" && ${KERN_OPTS:MFIB_ALGO}
 _dpdk_lpm4=	dpdk_lpm4
+_fib_dxr=	fib_dxr
 .endif
 
 .if ${MK_INET6_SUPPORT} != "no" && ${KERN_OPTS:MFIB_ALGO}
@@ -617,10 +620,16 @@ _em=		em
 _rockchip=	rockchip
 .endif
 
+.if ${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "arm"
+_sdhci_fdt=	sdhci_fdt
+.endif
+
 .if ${MACHINE_CPUARCH} == "i386" || ${MACHINE_CPUARCH} == "amd64"
 _agp=		agp
 _an=		an
+.if ${MACHINE_CPUARCH} == "i386" || !empty(COMPAT_FREEBSD32_ENABLED)
 _aout=		aout
+.endif
 _bios=		bios
 .if ${MK_SOURCELESS_UCODE} != "no"
 _bxe=		bxe
@@ -635,6 +644,7 @@ _et=		et
 _ftwd=		ftwd
 _exca=		exca
 _if_ndis=	if_ndis
+_igc=		igc
 _io=		io
 _itwd=		itwd
 _ix=		ix
@@ -722,6 +732,7 @@ _tpm=		tpm
 _twa=		twa
 _vesa=		vesa
 _viawd=		viawd
+_vmd=		vmd
 _wpi=		wpi
 .if ${MK_SOURCELESS_UCODE} != "no"
 _wpifw=		wpifw
@@ -740,7 +751,6 @@ _pms=		pms
 _qlxge=		qlxge
 _qlxgb=		qlxgb
 _sume=		sume
-_vmd=		vmd
 .if ${MK_SOURCELESS_UCODE} != "no"
 _qlxgbe=	qlxgbe
 _qlnx=		qlnx

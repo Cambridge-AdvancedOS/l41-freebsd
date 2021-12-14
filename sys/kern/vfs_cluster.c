@@ -36,8 +36,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_debug_cluster.h"
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -55,12 +53,6 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <sys/sysctl.h>
-
-#if defined(CLUSTERDEBUG)
-static int	rcluster= 0;
-SYSCTL_INT(_debug, OID_AUTO, rcluster, CTLFLAG_RW, &rcluster, 0,
-    "Debug VFS clustering code");
-#endif
 
 static MALLOC_DEFINE(M_SEGMENT, "cl_savebuf", "cluster_save buffer");
 static uma_zone_t cluster_pbuf_zone;
@@ -654,7 +646,7 @@ void
 cluster_write(struct vnode *vp, struct buf *bp, u_quad_t filesize, int seqcount,
     int gbflags)
 {
-	daddr_t lbn;
+	daddr_t lbn, pbn;
 	int maxclen, cursize;
 	int lblocksize;
 	int async;
@@ -760,14 +752,16 @@ cluster_write(struct vnode *vp, struct buf *bp, u_quad_t filesize, int seqcount,
 		    (bp->b_blkno == bp->b_lblkno) &&
 		    (VOP_BMAP(vp, lbn, NULL, &bp->b_blkno, &maxclen, NULL) ||
 		     bp->b_blkno == -1)) {
+			pbn = bp->b_blkno;
 			bawrite(bp);
 			vp->v_clen = 0;
-			vp->v_lasta = bp->b_blkno;
+			vp->v_lasta = pbn;
 			vp->v_cstart = lbn + 1;
 			vp->v_lastw = lbn;
 			return;
 		}
 		vp->v_clen = maxclen;
+		pbn = bp->b_blkno;
 		if (!async && maxclen == 0) {	/* I/O not contiguous */
 			vp->v_cstart = lbn + 1;
 			bawrite(bp);
@@ -781,6 +775,7 @@ cluster_write(struct vnode *vp, struct buf *bp, u_quad_t filesize, int seqcount,
 		 * are operating sequentially, otherwise let the buf or
 		 * update daemon handle it.
 		 */
+		pbn = bp->b_blkno;
 		bdwrite(bp);
 		if (seqcount > 1) {
 			cluster_wbuild_wb(vp, lblocksize, vp->v_cstart,
@@ -792,15 +787,17 @@ cluster_write(struct vnode *vp, struct buf *bp, u_quad_t filesize, int seqcount,
 		/*
 		 * We are low on memory, get it going NOW
 		 */
+		pbn = bp->b_blkno;
 		bawrite(bp);
 	} else {
 		/*
 		 * In the middle of a cluster, so just delay the I/O for now.
 		 */
+		pbn = bp->b_blkno;
 		bdwrite(bp);
 	}
 	vp->v_lastw = lbn;
-	vp->v_lasta = bp->b_blkno;
+	vp->v_lasta = pbn;
 }
 
 /*

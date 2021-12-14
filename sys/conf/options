@@ -229,8 +229,10 @@ ZSTDIO		opt_zstdio.h
 
 # Sanitizers
 COVERAGE	opt_global.h
+KASAN		opt_global.h
 KCOV
 KCSAN		opt_global.h
+KMSAN		opt_global.h
 KUBSAN		opt_global.h
 
 # POSIX kernel options
@@ -570,7 +572,6 @@ TI_JUMBO_HDRSPLIT	opt_ti.h
 # Misc debug flags.  Most of these should probably be replaced with
 # 'DEBUG', and then let people recompile just the interesting modules
 # with 'make CC="cc -DDEBUG"'.
-CLUSTERDEBUG		opt_debug_cluster.h
 DEBUG_1284		opt_ppb_1284.h
 LPT_DEBUG		opt_lpt.h
 PLIP_DEBUG		opt_plip.h
@@ -1021,3 +1022,11 @@ IICHID_DEBUG	opt_hid.h
 IICHID_SAMPLING	opt_hid.h
 HKBD_DFLT_KEYMAP	opt_hkbd.h
 HIDRAW_MAKE_UHID_ALIAS	opt_hid.h
+
+# kenv options
+# The early kernel environment (loader environment, config(8)-provided static)
+# is typically cleared after the dynamic environment comes up to ensure that
+# we're not inadvertently holding on to 'secret' values in these stale envs.
+# This option is insecure except in controlled environments where the static
+# environment's contents are known to be safe.
+PRESERVE_EARLY_KENV	opt_global.h

@@ -90,7 +90,6 @@ TESTS_SRCS= \
 	test_entry_strmode.c			\
 	test_extattr_freebsd.c			\
 	test_filter_count.c			\
-	test_fuzz.c				\
 	test_gnutar_filename_encoding.c		\
 	test_link_resolver.c			\
 	test_open_fd.c				\
@@ -215,6 +214,7 @@ TESTS_SRCS= \
 	test_read_too_many_filters.c		\
 	test_read_truncated.c			\
 	test_read_truncated_filter.c		\
+	test_short_writes.c			\
 	test_sparse_basic.c			\
 	test_tar_filenames.c			\
 	test_tar_large.c			\
@@ -224,6 +224,7 @@ TESTS_SRCS= \
 	test_write_disk.c			\
 	test_write_disk_appledouble.c		\
 	test_write_disk_failures.c		\
+	test_write_disk_fixup.c			\
 	test_write_disk_hardlink.c		\
 	test_write_disk_hfs_compression.c	\
 	test_write_disk_lookup.c		\
@@ -303,9 +304,18 @@ TESTS_SRCS= \
 # Fails with `test_read_disk_directory_traversals.c:1094: File at has atime 886622, 1443306049 seconds ago`
 BROKEN_TESTS+=			test_read_disk_directory_traversals
 
+.if 0
+# test_fuzz.c is not a real test, but rather a simple fuzz-test using random().
+# Since this is not a regression/unit test, we don't include it by default.
+# If you would still like to include it, comment out the `.if 0`.
+TEST_SCRCS+=	test_fuzz.c
+${PACKAGE}FILES+=	test_fuzz.cab.uu
+${PACKAGE}FILES+=	test_fuzz.lzh.uu
+${PACKAGE}FILES+=	test_fuzz_1.iso.Z.uu
 # Non-deterministic failures:
 # (Times out?) [and] crashes
 BROKEN_TESTS+=			test_fuzz_rar
+.endif
 
 # https://bugs.freebsd.org/240683
 BROKEN_TESTS+=			test_write_filter_zstd
@@ -383,9 +393,6 @@ ${PACKAGE}FILES+=	test_compat_zip_7.xps.uu
 ${PACKAGE}FILES+=	test_compat_zip_8.zip.uu
 ${PACKAGE}FILES+=	test_compat_zstd_1.tar.zst.uu
 ${PACKAGE}FILES+=	test_compat_zstd_2.tar.zst.uu
-${PACKAGE}FILES+=	test_fuzz.cab.uu
-${PACKAGE}FILES+=	test_fuzz.lzh.uu
-${PACKAGE}FILES+=	test_fuzz_1.iso.Z.uu
 ${PACKAGE}FILES+=	test_pax_filename_encoding.tar.uu
 ${PACKAGE}FILES+=	test_pax_xattr_header_all.tar.uu
 ${PACKAGE}FILES+=	test_pax_xattr_header_libarchive.tar.uu
@@ -577,6 +584,7 @@ ${PACKAGE}FILES+=	test_read_format_ustar_filename_koi8r.tar.Z.uu
 ${PACKAGE}FILES+=	test_read_format_warc.warc.uu
 ${PACKAGE}FILES+=	test_read_format_zip.zip.uu
 ${PACKAGE}FILES+=	test_read_format_zip_7075_utf8_paths.zip.uu
+${PACKAGE}FILES+=	test_read_format_zip_7z_deflate.zip.uu
 ${PACKAGE}FILES+=	test_read_format_zip_7z_lzma.zip.uu
 ${PACKAGE}FILES+=	test_read_format_zip_bz2_hang.zip.uu
 ${PACKAGE}FILES+=	test_read_format_zip_bzip2.zipx.uu

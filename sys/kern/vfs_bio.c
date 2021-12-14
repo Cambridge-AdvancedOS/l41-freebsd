@@ -49,6 +49,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/asan.h>
 #include <sys/bio.h>
 #include <sys/bitset.h>
 #include <sys/conf.h>
@@ -1043,6 +1044,15 @@ kern_vfs_bio_buffer_alloc(caddr_t v, long physmem_est)
 	int tuned_nbuf;
 	long maxbuf, maxbuf_sz, buf_sz,	biotmap_sz;
 
+#ifdef KASAN
+	/*
+	 * With KASAN enabled, the kernel map is shadowed.  Account for this
+	 * when sizing maps based on the amount of physical memory available.
+	 */
+	physmem_est = (physmem_est * KASAN_SHADOW_SCALE) /
+	    (KASAN_SHADOW_SCALE + 1);
+#endif
+
 	/*
 	 * physmem_est is in pages.  Convert it to kilobytes (assumes
 	 * PAGE_SIZE is >= 1K)
@@ -1433,16 +1443,28 @@ bufshutdown(int show_busybufs)
 		 */
 		printf("Giving up on %d buffers\n", nbusy);
 		DELAY(5000000);	/* 5 seconds */
+		swapoff_all();
 	} else {
 		if (!first_buf_printf)
 			printf("Final sync complete\n");
+
 		/*
-		 * Unmount filesystems
+		 * Unmount filesystems and perform swapoff, to quiesce
+		 * the system as much as possible.  In particular, no
+		 * I/O should be initiated from top levels since it
+		 * might be abruptly terminated by reset, or otherwise
+		 * erronously handled because other parts of the
+		 * system are disabled.
+		 *
+		 * Swapoff before unmount, because file-backed swap is
+		 * non-operational after unmount of the underlying
+		 * filesystem.
 		 */
-		if (!KERNEL_PANICKED())
+		if (!KERNEL_PANICKED()) {
+			swapoff_all();
 			vfs_unmountall();
+		}
 	}
-	swapoff_all();
 	DELAY(100000);		/* wait for console output to finish */
 }
 
@@ -2325,11 +2347,13 @@ void
 bufbdflush(struct bufobj *bo, struct buf *bp)
 {
 	struct buf *nbp;
+	struct bufdomain *bd;
 
-	if (bo->bo_dirty.bv_cnt > dirtybufthresh + 10) {
+	bd = &bdomain[bo->bo_domain];
+	if (bo->bo_dirty.bv_cnt > bd->bd_dirtybufthresh + 10) {
 		(void) VOP_FSYNC(bp->b_vp, MNT_NOWAIT, curthread);
 		altbufferflushes++;
-	} else if (bo->bo_dirty.bv_cnt > dirtybufthresh) {
+	} else if (bo->bo_dirty.bv_cnt > bd->bd_dirtybufthresh) {
 		BO_LOCK(bo);
 		/*
 		 * Try to find a buffer to flush.
@@ -2639,6 +2663,13 @@ brelse(struct buf *bp)
 		return;
 	}
 
+	if (LIST_EMPTY(&bp->b_dep)) {
+		bp->b_flags &= ~B_IOSTARTED;
+	} else {
+		KASSERT((bp->b_flags & B_IOSTARTED) == 0,
+		    ("brelse: SU io not finished bp %p", bp));
+	}
+
 	if ((bp->b_vflags & (BV_BKGRDINPROG | BV_BKGRDERR)) == BV_BKGRDERR) {
 		BO_LOCK(bp->b_bufobj);
 		bp->b_vflags &= ~BV_BKGRDERR;
@@ -2825,6 +2856,13 @@ bqrelse(struct buf *bp)
 	}
 	bp->b_flags &= ~(B_ASYNC | B_NOCACHE | B_AGE | B_RELBUF);
 	bp->b_xflags &= ~(BX_CVTENXIO);
+
+	if (LIST_EMPTY(&bp->b_dep)) {
+		bp->b_flags &= ~B_IOSTARTED;
+	} else {
+		KASSERT((bp->b_flags & B_IOSTARTED) == 0,
+		    ("bqrelse: SU io not finished bp %p", bp));
+	}
 
 	if (bp->b_flags & B_MANAGED) {
 		if (bp->b_flags & B_REMFREE)
@@ -3454,7 +3492,7 @@ buf_daemon()
 static int flushwithdeps = 0;
 SYSCTL_INT(_vfs, OID_AUTO, flushwithdeps, CTLFLAG_RW | CTLFLAG_STATS,
     &flushwithdeps, 0,
-    "Number of buffers flushed with dependecies that require rollbacks");
+    "Number of buffers flushed with dependencies that require rollbacks");
 
 static int
 flushbufqueues(struct vnode *lvp, struct bufdomain *bd, int target,
@@ -3876,7 +3914,8 @@ getblkx(struct vnode *vp, daddr_t blkno, daddr_t dblkno, int size, int slpflag,
 	CTR3(KTR_BUF, "getblk(%p, %ld, %d)", vp, (long)blkno, size);
 	KASSERT((flags & (GB_UNMAPPED | GB_KVAALLOC)) != GB_KVAALLOC,
 	    ("GB_KVAALLOC only makes sense with GB_UNMAPPED"));
-	ASSERT_VOP_LOCKED(vp, "getblk");
+	if (vp->v_type != VCHR)
+		ASSERT_VOP_LOCKED(vp, "getblk");
 	if (size > maxbcachebuf)
 		panic("getblk: size(%d) > maxbcachebuf(%d)\n", size,
 		    maxbcachebuf);
@@ -4356,14 +4395,14 @@ biodone(struct bio *bp)
  * Wait for a BIO to finish.
  */
 int
-biowait(struct bio *bp, const char *wchan)
+biowait(struct bio *bp, const char *wmesg)
 {
 	struct mtx *mtxp;
 
 	mtxp = mtx_pool_find(mtxpool_sleep, bp);
 	mtx_lock(mtxp);
 	while ((bp->bio_flags & BIO_DONE) == 0)
-		msleep(bp, mtxp, PRIBIO, wchan, 0);
+		msleep(bp, mtxp, PRIBIO, wmesg, 0);
 	mtx_unlock(mtxp);
 	if (bp->bio_error != 0)
 		return (bp->bio_error);
@@ -4884,9 +4923,8 @@ vm_hold_load_pages(struct buf *bp, vm_offset_t from, vm_offset_t to)
 		 * could interfere with paging I/O, no matter which
 		 * process we are.
 		 */
-		p = vm_page_alloc(NULL, 0, VM_ALLOC_SYSTEM | VM_ALLOC_NOOBJ |
-		    VM_ALLOC_WIRED | VM_ALLOC_COUNT((to - pg) >> PAGE_SHIFT) |
-		    VM_ALLOC_WAITOK);
+		p = vm_page_alloc_noobj(VM_ALLOC_SYSTEM | VM_ALLOC_WIRED |
+		    VM_ALLOC_COUNT((to - pg) >> PAGE_SHIFT) | VM_ALLOC_WAITOK);
 		pmap_qenter(pg, &p, 1);
 		bp->b_pages[index] = p;
 	}
@@ -5161,8 +5199,8 @@ vfs_bio_getpages(struct vnode *vp, vm_page_t *ma, int count,
 	struct mount *mp;
 	daddr_t lbn, lbnp;
 	vm_ooffset_t la, lb, poff, poffe;
-	long bsize;
-	int bo_bs, br_flags, error, i, pgsin, pgsin_a, pgsin_b;
+	long bo_bs, bsize;
+	int br_flags, error, i, pgsin, pgsin_a, pgsin_b;
 	bool redo, lpart;
 
 	object = vp->v_object;
@@ -5179,7 +5217,10 @@ vfs_bio_getpages(struct vnode *vp, vm_page_t *ma, int count,
 	 */
 	la += PAGE_SIZE;
 	lpart = la > object->un_pager.vnp.vnp_size;
-	bo_bs = get_blksize(vp, get_lblkno(vp, IDX_TO_OFF(ma[0]->pindex)));
+	error = get_blksize(vp, get_lblkno(vp, IDX_TO_OFF(ma[0]->pindex)),
+	    &bo_bs);
+	if (error != 0)
+		return (VM_PAGER_ERROR);
 
 	/*
 	 * Calculate read-ahead, behind and total pages.
@@ -5235,9 +5276,10 @@ again:
 				goto next_page;
 			lbnp = lbn;
 
-			bsize = get_blksize(vp, lbn);
-			error = bread_gb(vp, lbn, bsize, curthread->td_ucred,
-			    br_flags, &bp);
+			error = get_blksize(vp, lbn, &bsize);
+			if (error == 0)
+				error = bread_gb(vp, lbn, bsize,
+				    curthread->td_ucred, br_flags, &bp);
 			if (error != 0)
 				goto end_pages;
 			if (bp->b_rcred == curthread->td_ucred) {

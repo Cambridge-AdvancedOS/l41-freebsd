@@ -80,6 +80,7 @@ CONFS=	DAEMON \
 	pf \
 	pflog \
 	pfsync \
+	powerd \
 	ppp \
 	pppoed \
 	pwcheck \
@@ -106,6 +107,7 @@ CONFS=	DAEMON \
 	swap \
 	swaplate \
 	sysctl \
+	sysctl_lastload \
 	syslogd \
 	sysvipc \
 	tmp \
@@ -134,10 +136,6 @@ ACCTPACKAGE=	acct
 CONFGROUPS+=	ACPI
 ACPI=		power_profile
 ACPIPACKAGE=	acpi
-.endif
-
-.if ${MK_ACPI} != "no" || ${MK_APM} != "no"
-CONFS+=		powerd
 .endif
 
 .if ${MK_APM} != "no"
@@ -271,6 +269,10 @@ _opensm=	opensm
 
 .if ${MK_OPENSSL} != "no"
 CONFS+=		keyserv
+.if ${MK_OPENSSL_KTLS} != "no"
+CONFS+=		tlsclntd \
+		tlsservd
+.endif
 .endif
 
 .if ${MK_OPENSSH} != "no"
@@ -319,6 +321,7 @@ CONFGROUPS+=	ZFS
 ZFS+=		zfs
 ZFS+=		zfsbe
 ZFS+=		zfsd
+ZFS+=		zfskeys
 ZFS+=		zpool
 ZFS+=		zvol
 ZFSPACKAGE=	rc

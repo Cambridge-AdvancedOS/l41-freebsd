@@ -196,6 +196,7 @@ _Static_assert(sizeof(struct mount_pcpu) == 16,
  * 	l - mnt_listmtx
  *	m - mountlist_mtx
  *	i - interlock
+ *	i* - interlock of uppers' list head
  *	v - vnode freelist mutex
  *
  * Unmarked fields are considered stable as long as a ref is held.
@@ -221,7 +222,7 @@ struct mount {
 	int		mnt_writeopcount;	/* (i) write syscalls pending */
 	struct vfsoptlist *mnt_opt;		/* current mount options */
 	struct vfsoptlist *mnt_optnew;		/* new options passed to fs */
-	int		mnt_maxsymlinklen;	/* max size of short symlink */
+	u_int		mnt_pad0;		/* was mnt_maxsymlinklen */
 	struct statfs	mnt_stat;		/* cache of filesystem stats */
 	struct ucred	*mnt_cred;		/* credentials of mounter */
 	void *		mnt_data;		/* private data */
@@ -240,8 +241,8 @@ struct mount {
 	struct vnodelst	mnt_lazyvnodelist;	/* (l) list of lazy vnodes */
 	int		mnt_lazyvnodelistsize;	/* (l) # of lazy vnodes */
 	struct lock	mnt_explock;		/* vfs_export walkers lock */
-	TAILQ_ENTRY(mount) mnt_upper_link;	/* (m) we in the all uppers */
-	TAILQ_HEAD(, mount) mnt_uppers;		/* (m) upper mounts over us*/
+	TAILQ_ENTRY(mount) mnt_upper_link;	/* (i*) we in the all uppers */
+	TAILQ_HEAD(, mount) mnt_uppers;		/* (i) upper mounts over us */
 };
 
 /*
@@ -377,9 +378,7 @@ struct mntoptnames {
 #define	MNT_EXTLSCERTUSER 0x0000010000000000ULL /* require TLS with user cert */
 
 /*
- * Flags set by internal operations,
- * but visible to the user.
- * XXX some of these are not quite right.. (I've never seen the root flag set)
+ * Flags set by internal operations, but visible to the user.
  */
 #define	MNT_LOCAL	0x0000000000001000ULL /* filesystem is stored locally */
 #define	MNT_QUOTA	0x0000000000002000ULL /* quotas are enabled on fs */
@@ -997,6 +996,7 @@ void	vfs_mount_error(struct mount *, const char *, ...);
 void	vfs_mountroot(void);			/* mount our root filesystem */
 void	vfs_mountedfrom(struct mount *, const char *from);
 void	vfs_notify_upper(struct vnode *, int);
+struct mount *vfs_ref_from_vp(struct vnode *);
 void	vfs_ref(struct mount *);
 void	vfs_rel(struct mount *);
 struct mount *vfs_mount_alloc(struct vnode *, struct vfsconf *, const char *,
@@ -1086,7 +1086,7 @@ void resume_all_fs(void);
 	_mpcpu = vfs_mount_pcpu(mp);				\
 	MPASS(mpcpu->mntp_thread_in_ops == 0);			\
 	_mpcpu->mntp_thread_in_ops = 1;				\
-	__compiler_membar();					\
+	atomic_interrupt_fence();					\
 	if (__predict_false(mp->mnt_vfs_ops > 0)) {		\
 		vfs_op_thread_exit_crit(mp, _mpcpu);		\
 		_retval_crit = false;				\
@@ -1106,7 +1106,7 @@ void resume_all_fs(void);
 #define vfs_op_thread_exit_crit(mp, _mpcpu) do {		\
 	MPASS(_mpcpu == vfs_mount_pcpu(mp));			\
 	MPASS(_mpcpu->mntp_thread_in_ops == 1);			\
-	__compiler_membar();					\
+	atomic_interrupt_fence();					\
 	_mpcpu->mntp_thread_in_ops = 0;				\
 } while (0)
 

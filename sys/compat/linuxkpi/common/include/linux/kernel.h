@@ -45,6 +45,7 @@
 
 #include <linux/bitops.h>
 #include <linux/compiler.h>
+#include <linux/stringify.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -88,8 +89,23 @@
 #define	S64_C(x) x ## LL
 #define	U64_C(x) x ## ULL
 
+/*
+ * BUILD_BUG_ON() can happen inside functions where _Static_assert() does not
+ * seem to work.  Use old-schoold-ish CTASSERT from before commit
+ * a3085588a88fa58eb5b1eaae471999e1995a29cf but also make sure we do not
+ * end up with an unused typedef or variable. The compiler should optimise
+ * it away entirely.
+ */
+#define	_O_CTASSERT(x)		_O__CTASSERT(x, __LINE__)
+#define	_O__CTASSERT(x, y)	_O___CTASSERT(x, y)
+#define	_O___CTASSERT(x, y)	while (0) { \
+    typedef char __assert_line_ ## y[(x) ? 1 : -1]; \
+    __assert_line_ ## y _x; \
+    _x[0] = '\0'; \
+}
+
 #define	BUILD_BUG()			do { CTASSERT(0); } while (0)
-#define	BUILD_BUG_ON(x)			CTASSERT(!(x))
+#define	BUILD_BUG_ON(x)			_O_CTASSERT(!(x))
 #define	BUILD_BUG_ON_MSG(x, msg)	BUILD_BUG_ON(x)
 #define	BUILD_BUG_ON_NOT_POWER_OF_2(x)	BUILD_BUG_ON(!powerof2(x))
 #define	BUILD_BUG_ON_INVALID(expr)	while (0) { (void)(expr); }
@@ -105,28 +121,31 @@ extern const volatile int lkpi_build_bug_on_zero;
 	}							\
 } while (0)
 
+extern int linuxkpi_warn_dump_stack;
 #define	WARN_ON(cond) ({					\
-      bool __ret = (cond);					\
-      if (__ret) {						\
+	bool __ret = (cond);					\
+	if (__ret) {						\
 		printf("WARNING %s failed at %s:%d\n",		\
 		    __stringify(cond), __FILE__, __LINE__);	\
-		linux_dump_stack();				\
-      }								\
-      unlikely(__ret);						\
+		if (linuxkpi_warn_dump_stack)				\
+			linux_dump_stack();				\
+	}								\
+	unlikely(__ret);						\
 })
 
 #define	WARN_ON_SMP(cond)	WARN_ON(cond)
 
 #define	WARN_ON_ONCE(cond) ({					\
-      static bool __warn_on_once;				\
-      bool __ret = (cond);					\
-      if (__ret && !__warn_on_once) {				\
+	static bool __warn_on_once;				\
+	bool __ret = (cond);					\
+	if (__ret && !__warn_on_once) {				\
 		__warn_on_once = 1;				\
 		printf("WARNING %s failed at %s:%d\n",		\
 		    __stringify(cond), __FILE__, __LINE__);	\
-		linux_dump_stack();				\
-      }								\
-      unlikely(__ret);						\
+		if (linuxkpi_warn_dump_stack)				\
+			linux_dump_stack();				\
+	}								\
+	unlikely(__ret);						\
 })
 
 #define	oops_in_progress	SCHEDULER_STOPPED()
@@ -235,6 +254,8 @@ extern int linuxkpi_debug;
 	log(LOG_CRIT, pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_err(fmt, ...) \
 	log(LOG_ERR, pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_err_once(fmt, ...) \
+	log_once(LOG_ERR, pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_warning(fmt, ...) \
 	log(LOG_WARNING, pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_warn(...) \
@@ -282,6 +303,8 @@ extern int linuxkpi_debug;
 #define	ARRAY_SIZE(x)	(sizeof(x) / sizeof((x)[0]))
 
 #define	u64_to_user_ptr(val)	((void *)(uintptr_t)(val))
+
+#define _RET_IP_		__builtin_return_address(0)
 
 static inline unsigned long long
 simple_strtoull(const char *cp, char **endp, unsigned int base)
@@ -369,6 +392,24 @@ kstrtouint(const char *cp, unsigned int base, unsigned int *res)
 	if (*cp == 0 || *end != 0)
 		return (-EINVAL);
 	if (temp != (unsigned int)temp)
+		return (-ERANGE);
+	return (0);
+}
+
+static inline int
+kstrtou8(const char *cp, unsigned int base, u8 *res)
+{
+	char *end;
+	unsigned long temp;
+
+	*res = temp = strtoul(cp, &end, base);
+
+	/* skip newline character, if any */
+	if (*end == '\n')
+		end++;
+	if (*cp == 0 || *end != 0)
+		return (-EINVAL);
+	if (temp != (u8)temp)
 		return (-ERANGE);
 	return (0);
 }
@@ -462,6 +503,21 @@ kstrtobool_from_user(const char __user *s, size_t count, bool *res)
 		return (-EFAULT);
 
 	return (kstrtobool(buf, res));
+}
+
+static inline int
+kstrtou8_from_user(const char __user *s, size_t count, unsigned int base,
+    u8 *p)
+{
+	char buf[8] = {};
+
+	if (count > (sizeof(buf) - 1))
+		count = (sizeof(buf) - 1);
+
+	if (copy_from_user(buf, s, count))
+		return (-EFAULT);
+
+	return (kstrtou8(buf, base, p));
 }
 
 #define min(x, y)	((x) < (y) ? (x) : (y))

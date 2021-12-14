@@ -80,6 +80,7 @@ struct devmem_softc {
 struct vmmdev_softc {
 	struct vm	*vm;		/* vm instance cookie */
 	struct cdev	*cdev;
+	struct ucred	*ucred;
 	SLIST_ENTRY(vmmdev_softc) link;
 	SLIST_HEAD(, devmem_softc) devmem;
 	int		flags;
@@ -181,6 +182,12 @@ vmmdev_lookup(const char *name)
 		if (strcmp(name, vm_name(sc->vm)) == 0)
 			break;
 	}
+
+	if (sc == NULL)
+		return (NULL);
+
+	if (cr_cansee(curthread->td_ucred, sc->ucred))
+		return (NULL);
 
 	return (sc);
 }
@@ -381,6 +388,7 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 	struct vm_rtc_time *rtctime;
 	struct vm_rtc_data *rtcdata;
 	struct vm_memmap *mm;
+	struct vm_munmap *mu;
 	struct vm_cpu_topology *topology;
 	struct vm_readwrite_kernemu_device *kernemu;
 	uint64_t *regvals;
@@ -435,6 +443,7 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		break;
 
 	case VM_MAP_PPTDEV_MMIO:
+	case VM_UNMAP_PPTDEV_MMIO:
 	case VM_BIND_PPTDEV:
 	case VM_UNBIND_PPTDEV:
 #ifdef COMPAT_FREEBSD12
@@ -442,6 +451,7 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 #endif
 	case VM_ALLOC_MEMSEG:
 	case VM_MMAP_MEMSEG:
+	case VM_MUNMAP_MEMSEG:
 	case VM_REINIT:
 		/*
 		 * ioctls that operate on the entire virtual machine must
@@ -524,6 +534,11 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		error = ppt_map_mmio(sc->vm, pptmmio->bus, pptmmio->slot,
 				     pptmmio->func, pptmmio->gpa, pptmmio->len,
 				     pptmmio->hpa);
+		break;
+	case VM_UNMAP_PPTDEV_MMIO:
+		pptmmio = (struct vm_pptdev_mmio *)data;
+		error = ppt_unmap_mmio(sc->vm, pptmmio->bus, pptmmio->slot,
+				       pptmmio->func, pptmmio->gpa, pptmmio->len);
 		break;
 	case VM_BIND_PPTDEV:
 		pptdev = (struct vm_pptdev *)data;
@@ -642,6 +657,10 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		mm = (struct vm_memmap *)data;
 		error = vm_mmap_memseg(sc->vm, mm->gpa, mm->segid, mm->segoff,
 		    mm->len, mm->prot, mm->flags);
+		break;
+	case VM_MUNMAP_MEMSEG:
+		mu = (struct vm_munmap *)data;
+		error = vm_munmap_memseg(sc->vm, mu->gpa, mu->len);
 		break;
 #ifdef COMPAT_FREEBSD12
 	case VM_ALLOC_MEMSEG_FBSD12:
@@ -967,6 +986,9 @@ vmmdev_destroy(void *arg)
 	if (sc->vm != NULL)
 		vm_destroy(sc->vm);
 
+	if (sc->ucred != NULL)
+		crfree(sc->ucred);
+
 	if ((sc->flags & VSC_LINKED) != 0) {
 		mtx_lock(&vmmdev_mtx);
 		SLIST_REMOVE(&head, sc, vmmdev_softc, link);
@@ -1084,6 +1106,7 @@ sysctl_vmm_create(SYSCTL_HANDLER_ARGS)
 		goto out;
 
 	sc = malloc(sizeof(struct vmmdev_softc), M_VMMDEV, M_WAITOK | M_ZERO);
+	sc->ucred = crhold(curthread->td_ucred);
 	sc->vm = vm;
 	SLIST_INIT(&sc->devmem);
 
@@ -1105,8 +1128,8 @@ sysctl_vmm_create(SYSCTL_HANDLER_ARGS)
 		goto out;
 	}
 
-	error = make_dev_p(MAKEDEV_CHECKNAME, &cdev, &vmmdevsw, NULL,
-			   UID_ROOT, GID_WHEEL, 0600, "vmm/%s", buf);
+	error = make_dev_p(MAKEDEV_CHECKNAME, &cdev, &vmmdevsw, sc->ucred,
+	    UID_ROOT, GID_WHEEL, 0600, "vmm/%s", buf);
 	if (error != 0) {
 		vmmdev_destroy(sc);
 		goto out;

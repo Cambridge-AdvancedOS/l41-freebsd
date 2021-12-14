@@ -3,6 +3,7 @@
 .PATH: ${SRCTOP}/cddl/contrib/opensolaris/lib/libdtrace/common
 .PATH: ${SRCTOP}/cddl/contrib/opensolaris/lib/libgen/common
 
+PACKAGE=	dtrace
 LIB=		dtrace
 SRCS=		dt_aggregate.c \
 		dt_as.c \
@@ -128,8 +129,6 @@ CFLAGS+=	-I${OPENSOLARIS_SYS_DISTDIR}/uts/intel
 SRCS+=		dis_tables.c
 DSRCS+=		regs_x86.d
 .endif
-
-LFLAGS+=-l
 
 YFLAGS+=-d
 

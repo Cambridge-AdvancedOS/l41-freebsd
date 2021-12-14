@@ -713,11 +713,9 @@ in6_ifattach(struct ifnet *ifp, struct ifnet *altifp)
 		/*
 		 * check that loopback address doesn't exist yet.
 		 */
-		ia = in6ifa_ifwithaddr(&in6addr_loopback, 0);
+		ia = in6ifa_ifwithaddr(&in6addr_loopback, 0, false);
 		if (ia == NULL)
 			in6_ifattach_loopback(ifp);
-		else
-			ifa_free(&ia->ia_ifa);
 	}
 
 	/*
@@ -830,6 +828,7 @@ void
 in6_tmpaddrtimer(void *arg)
 {
 	CURVNET_SET((struct vnet *) arg);
+	struct epoch_tracker et;
 	struct nd_ifinfo *ndi;
 	u_int8_t nullbuf[8];
 	struct ifnet *ifp;
@@ -839,6 +838,7 @@ in6_tmpaddrtimer(void *arg)
 	    V_ip6_temp_regen_advance) * hz, in6_tmpaddrtimer, curvnet);
 
 	bzero(nullbuf, sizeof(nullbuf));
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link) {
 		if (ifp->if_afdata[AF_INET6] == NULL)
 			continue;
@@ -852,7 +852,7 @@ in6_tmpaddrtimer(void *arg)
 			    ndi->randomseed1, ndi->randomid);
 		}
 	}
-
+	NET_EPOCH_EXIT(et);
 	CURVNET_RESTORE();
 }
 
@@ -889,7 +889,7 @@ in6_ifattach_init(void *dummy)
 {
 
 	/* Timer for regeneranation of temporary addresses randomize ID. */
-	callout_init(&V_in6_tmpaddrtimer_ch, 0);
+	callout_init(&V_in6_tmpaddrtimer_ch, 1);
 	callout_reset(&V_in6_tmpaddrtimer_ch,
 	    (V_ip6_temp_preferred_lifetime - V_ip6_desync_factor -
 	    V_ip6_temp_regen_advance) * hz,

@@ -33,9 +33,6 @@
 static const char copyright[] =
 "@(#) Copyright (c) 1983, 1993\n\
 	The Regents of the University of California.  All rights reserved.\n";
-#endif /* not lint */
-
-#ifndef lint
 #if 0
 static char sccsid[] = "@(#)ifconfig.c	8.2 (Berkeley) 2/16/94";
 #endif
@@ -78,7 +75,11 @@ static const char rcsid[] =
 #include <string.h>
 #include <unistd.h>
 
+#include <libifconfig.h>
+
 #include "ifconfig.h"
+
+ifconfig_handle_t *lifh;
 
 /*
  * Since "struct ifreq" is composed of various union members, callers
@@ -115,7 +116,7 @@ static	void status(const struct afswtch *afp, const struct sockaddr_dl *sdl,
 static	void tunnel_status(int s);
 static _Noreturn void usage(void);
 
-static int getifflags(const char *ifname, int us);
+static int getifflags(const char *ifname, int us, bool err_ok);
 
 static struct afswtch *af_getbyname(const char *name);
 static struct afswtch *af_getbyfamily(int af);
@@ -211,8 +212,6 @@ ioctl_ifcreate(int s, struct ifreq *ifr)
 	}
 }
 
-#define ORDERS_SIZE(x) sizeof(x) / sizeof(x[0])
-
 static int
 calcorders(struct ifaddrs *ifa, struct ifa_queue *q)
 {
@@ -242,7 +241,7 @@ calcorders(struct ifaddrs *ifa, struct ifa_queue *q)
 		if (ifa->ifa_addr) {
 			af = ifa->ifa_addr->sa_family;
 
-			if (af < ORDERS_SIZE(cur->af_orders) &&
+			if (af < nitems(cur->af_orders) &&
 			    cur->af_orders[af] == 0)
 				cur->af_orders[af] = ++ord;
 		}
@@ -293,8 +292,7 @@ cmpifaddrs(struct ifaddrs *a, struct ifaddrs *b, struct ifa_queue *q)
 		af1 = a->ifa_addr->sa_family;
 		af2 = b->ifa_addr->sa_family;
 
-		if (af1 < ORDERS_SIZE(e1->af_orders) &&
-		    af2 < ORDERS_SIZE(e1->af_orders))
+		if (af1 < nitems(e1->af_orders) && af2 < nitems(e1->af_orders))
 			return (e1->af_orders[af1] - e1->af_orders[af2]);
 	}
 
@@ -342,8 +340,6 @@ static void setformat(char *input)
 	}
 	free(formatstr);
 }
-
-#undef ORDERS_SIZE
 
 static struct ifaddrs *
 sortifaddrs(struct ifaddrs *list,
@@ -426,6 +422,10 @@ main(int argc, char *argv[])
 	all = downonly = uponly = namesonly = noload = verbose = 0;
 	f_inet = f_inet6 = f_ether = f_addr = NULL;
 	matchgroup = nogroup = NULL;
+
+	lifh = ifconfig_open();
+	if (lifh == NULL)
+		err(EXIT_FAILURE, "ifconfig_open");
 
 	envformat = getenv("IFCONFIG_FORMAT");
 	if (envformat != NULL)
@@ -603,7 +603,7 @@ main(int argc, char *argv[])
 		if (iflen >= sizeof(name)) {
 			warnx("%s: interface name too long, skipping", ifname);
 		} else {
-			flags = getifflags(name, -1);
+			flags = getifflags(name, -1, false);
 			if (!(((flags & IFF_CANTCONFIG) != 0) ||
 				(downonly && (flags & IFF_UP) != 0) ||
 				(uponly && (flags & IFF_UP) == 0)))
@@ -699,6 +699,7 @@ main(int argc, char *argv[])
 
 done:
 	freeformat();
+	ifconfig_close(lifh);
 	exit(exit_code);
 }
 
@@ -999,7 +1000,7 @@ top:
 	 * Do any post argument processing required by the address family.
 	 */
 	if (afp->af_postproc != NULL)
-		afp->af_postproc(s, afp);
+		afp->af_postproc(s, afp, newaddr, getifflags(name, s, true));
 	/*
 	 * Do deferred callbacks registered while processing
 	 * command-line arguments.
@@ -1178,7 +1179,7 @@ setifdstaddr(const char *addr, int param __unused, int s,
 }
 
 static int
-getifflags(const char *ifname, int us)
+getifflags(const char *ifname, int us, bool err_ok)
 {
 	struct ifreq my_ifr;
 	int s;
@@ -1191,8 +1192,10 @@ getifflags(const char *ifname, int us)
 	} else
 		s = us;
  	if (ioctl(s, SIOCGIFFLAGS, (caddr_t)&my_ifr) < 0) {
- 		Perror("ioctl (SIOCGIFFLAGS)");
- 		exit(1);
+		if (!err_ok) {
+			Perror("ioctl (SIOCGIFFLAGS)");
+			exit(1);
+		}
  	}
 	if (us < 0)
 		close(s);
@@ -1210,7 +1213,7 @@ setifflags(const char *vname, int value, int s, const struct afswtch *afp)
 	struct ifreq		my_ifr;
 	int flags;
 
-	flags = getifflags(name, s);
+	flags = getifflags(name, s, false);
 	if (value < 0) {
 		value = -value;
 		flags &= ~value;
@@ -1514,7 +1517,7 @@ printb(const char *s, unsigned v, const char *bits)
 		bits++;
 		putchar('<');
 		while ((i = *bits++) != '\0') {
-			if (v & (1 << (i-1))) {
+			if (v & (1u << (i-1))) {
 				if (any)
 					putchar(',');
 				any = 1;

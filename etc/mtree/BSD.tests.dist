@@ -438,6 +438,8 @@
         ..
         ifconfig
         ..
+        md5
+        ..
         mdconfig
         ..
         nvmecontrol
@@ -864,6 +866,8 @@
         ..
         vm
         ..
+        vmm
+        ..
     ..
     usr.bin
         apply
@@ -992,6 +996,8 @@
         ..
         diff
         ..
+        diff3
+        ..
         dirname
         ..
         du
@@ -1056,6 +1062,8 @@
         ..
         soelim
         ..
+        sort
+        ..
         stat
         ..
         tail
@@ -1093,6 +1101,8 @@
     ..
     usr.sbin
         chown
+        ..
+        daemon
         ..
         etcupdate
         ..

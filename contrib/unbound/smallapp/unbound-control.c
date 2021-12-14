@@ -1,5 +1,5 @@
 /*
- * checkconf/unbound-control.c - remote control utility for unbound.
+ * smallapp/unbound-control.c - remote control utility for unbound.
  *
  * Copyright (c) 2008, NLnet Labs. All rights reserved.
  *
@@ -63,6 +63,7 @@
 #include "sldns/wire2str.h"
 #include "sldns/pkthdr.h"
 #include "services/rpz.h"
+#include "services/listen_dnsport.h"
 
 #ifdef HAVE_SYS_IPC_H
 #include "sys/ipc.h"
@@ -81,6 +82,9 @@
 static void usage(void) ATTR_NORETURN;
 static void ssl_err(const char* s) ATTR_NORETURN;
 static void ssl_path_err(const char* s, const char *path) ATTR_NORETURN;
+
+/** timeout to wait for connection over stream, in msec */
+#define UNBOUND_CONTROL_CONNECT_TIMEOUT 5000
 
 /** Give unbound-control usage, and exit (1). */
 static void
@@ -164,6 +168,9 @@ usage(void)
 	printf("  view_local_data_remove view name  	remove local-data in view\n");
 	printf("  view_local_datas_remove view 		remove list of local-data from view\n");
 	printf("  					one entry per line read from stdin\n");
+	printf("  rpz_enable zone		Enable the RPZ zone if it had previously\n");
+	printf("  				been disabled\n");
+	printf("  rpz_disable zone		Disable the RPZ zone\n");
 	printf("Version %s\n", PACKAGE_VERSION);
 	printf("BSD licensed, see LICENSE in source package for details.\n");
 	printf("Report bugs to %s\n", PACKAGE_BUGREPORT);
@@ -181,7 +188,7 @@ timeval_divide(struct timeval* avg, const struct timeval* sum, long long d)
 {
 #ifndef S_SPLINT_S
 	size_t leftover;
-	if(d == 0) {
+	if(d <= 0) {
 		avg->tv_sec = 0;
 		avg->tv_usec = 0;
 		return;
@@ -190,7 +197,13 @@ timeval_divide(struct timeval* avg, const struct timeval* sum, long long d)
 	avg->tv_usec = sum->tv_usec / d;
 	/* handle fraction from seconds divide */
 	leftover = sum->tv_sec - avg->tv_sec*d;
-	avg->tv_usec += (leftover*1000000)/d;
+	if(leftover <= 0)
+		leftover = 0;
+	avg->tv_usec += (((long long)leftover)*((long long)1000000))/d;
+	if(avg->tv_sec < 0)
+		avg->tv_sec = 0;
+	if(avg->tv_usec < 0)
+		avg->tv_usec = 0;
 #endif
 }
 
@@ -486,9 +499,7 @@ static void ssl_path_err(const char* s, const char *path)
 {
 	unsigned long err;
 	err = ERR_peek_error();
-	if (ERR_GET_LIB(err) == ERR_LIB_SYS &&
-		(ERR_GET_FUNC(err) == SYS_F_FOPEN ||
-		 ERR_GET_FUNC(err) == SYS_F_FREAD) ) {
+	if (ERR_GET_LIB(err) == ERR_LIB_SYS) {
 		fprintf(stderr, "error: %s\n%s: %s\n",
 			s, path, ERR_reason_error_string(err));
 		exit(1);
@@ -545,6 +556,30 @@ setup_ctx(struct config_file* cfg)
 	return ctx;
 }
 
+/** check connect error */
+static void
+checkconnecterr(int err, const char* svr, struct sockaddr_storage* addr,
+	socklen_t addrlen, int statuscmd, int useport)
+{
+#ifndef USE_WINSOCK
+	if(!useport) log_err("connect: %s for %s", strerror(err), svr);
+	else log_err_addr("connect", strerror(err), addr, addrlen);
+	if(err == ECONNREFUSED && statuscmd) {
+		printf("unbound is stopped\n");
+		exit(3);
+	}
+#else
+	int wsaerr = err;
+	if(!useport) log_err("connect: %s for %s", wsa_strerror(wsaerr), svr);
+	else log_err_addr("connect", wsa_strerror(wsaerr), addr, addrlen);
+	if(wsaerr == WSAECONNREFUSED && statuscmd) {
+		printf("unbound is stopped\n");
+		exit(3);
+	}
+#endif
+	exit(1);
+}
+
 /** contact the server with TCP connect */
 static int
 contact_server(const char* svr, struct config_file* cfg, int statuscmd)
@@ -553,10 +588,27 @@ contact_server(const char* svr, struct config_file* cfg, int statuscmd)
 	socklen_t addrlen;
 	int addrfamily = 0, proto = IPPROTO_TCP;
 	int fd, useport = 1;
+	char** rcif = NULL;
+	int num_rcif = 0;
 	/* use svr or the first config entry */
 	if(!svr) {
 		if(cfg->control_ifs.first) {
-			svr = cfg->control_ifs.first->str;
+			struct sockaddr_storage addr2;
+			socklen_t addrlen2;
+			if(extstrtoaddr(cfg->control_ifs.first->str, &addr2,
+				&addrlen2)) {
+				svr = cfg->control_ifs.first->str;
+			} else {
+				if(!resolve_interface_names(NULL, 0,
+					cfg->control_ifs.first, &rcif,
+					&num_rcif)) {
+					fatal_exit("could not resolve interface names");
+				}
+				if(rcif == NULL || num_rcif == 0) {
+					fatal_exit("no control interfaces");
+				}
+				svr = rcif[0];
+			}
 		} else if(cfg->do_ip4) {
 			svr = "127.0.0.1";
 		} else {
@@ -598,26 +650,76 @@ contact_server(const char* svr, struct config_file* cfg, int statuscmd)
 	if(fd == -1) {
 		fatal_exit("socket: %s", sock_strerror(errno));
 	}
+	fd_set_nonblock(fd);
 	if(connect(fd, (struct sockaddr*)&addr, addrlen) < 0) {
 #ifndef USE_WINSOCK
-		int err = errno;
-		if(!useport) log_err("connect: %s for %s", strerror(err), svr);
-		else log_err_addr("connect", strerror(err), &addr, addrlen);
-		if(err == ECONNREFUSED && statuscmd) {
-			printf("unbound is stopped\n");
-			exit(3);
-		}
-#else
-		int wsaerr = WSAGetLastError();
-		if(!useport) log_err("connect: %s for %s", wsa_strerror(wsaerr), svr);
-		else log_err_addr("connect", wsa_strerror(wsaerr), &addr, addrlen);
-		if(wsaerr == WSAECONNREFUSED && statuscmd) {
-			printf("unbound is stopped\n");
-			exit(3);
+#ifdef EINPROGRESS
+		if(errno != EINPROGRESS) {
+			checkconnecterr(errno, svr, &addr,
+				addrlen, statuscmd, useport);
 		}
 #endif
-		exit(1);
+#else
+		if(WSAGetLastError() != WSAEINPROGRESS &&
+			WSAGetLastError() != WSAEWOULDBLOCK) {
+			checkconnecterr(WSAGetLastError(), svr, &addr,
+				addrlen, statuscmd, useport);
+		}
+#endif
 	}
+	while(1) {
+		fd_set rset, wset, eset;
+		struct timeval tv;
+		FD_ZERO(&rset);
+		FD_SET(FD_SET_T fd, &rset);
+		FD_ZERO(&wset);
+		FD_SET(FD_SET_T fd, &wset);
+		FD_ZERO(&eset);
+		FD_SET(FD_SET_T fd, &eset);
+		tv.tv_sec = UNBOUND_CONTROL_CONNECT_TIMEOUT/1000;
+		tv.tv_usec= (UNBOUND_CONTROL_CONNECT_TIMEOUT%1000)*1000;
+		if(select(fd+1, &rset, &wset, &eset, &tv) == -1) {
+			fatal_exit("select: %s", sock_strerror(errno));
+		}
+		if(!FD_ISSET(fd, &rset) && !FD_ISSET(fd, &wset) &&
+			!FD_ISSET(fd, &eset)) {
+			fatal_exit("timeout: could not connect to server");
+		} else {
+			/* check nonblocking connect error */
+			int error = 0;
+			socklen_t len = (socklen_t)sizeof(error);
+			if(getsockopt(fd, SOL_SOCKET, SO_ERROR, (void*)&error,
+				&len) < 0) {
+#ifndef USE_WINSOCK
+				error = errno; /* on solaris errno is error */
+#else
+				error = WSAGetLastError();
+#endif
+			}
+			if(error != 0) {
+#ifndef USE_WINSOCK
+#ifdef EINPROGRESS
+				if(error == EINPROGRESS)
+					continue; /* try again later */
+#endif
+#ifdef EWOULDBLOCK
+				if(error == EWOULDBLOCK)
+					continue; /* try again later */
+#endif
+#else
+				if(error == WSAEINPROGRESS)
+					continue; /* try again later */
+				if(error == WSAEWOULDBLOCK)
+					continue; /* try again later */
+#endif
+				checkconnecterr(error, svr, &addr, addrlen,
+					statuscmd, useport);
+			}
+		}
+		break;
+	}
+	fd_set_block(fd);
+	config_del_strarray(rcif, num_rcif);
 	return fd;
 }
 
@@ -842,9 +944,9 @@ int main(int argc, char* argv[])
 	extern int check_locking_order;
 	check_locking_order = 0;
 #endif /* USE_THREAD_DEBUG */
+	checklock_start();
 	log_ident_set("unbound-control");
 	log_init(NULL, 0, NULL);
-	checklock_start();
 #ifdef USE_WINSOCK
 	/* use registry config file in preference to compiletime location */
 	if(!(cfgfile=w_lookup_reg_str("Software\\Unbound", "ConfigFile")))

@@ -12,43 +12,43 @@
 #define AS(name) (sizeof(struct name) / sizeof(register_t))
 
 #ifdef COMPAT_43
-#define compat(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(o,name)
+#define compat(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(o, name)
 #else
 #define compat(n, name) .sy_narg = 0, .sy_call = (sy_call_t *)nosys
 #endif
 
 #ifdef COMPAT_FREEBSD4
-#define compat4(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd4_,name)
+#define compat4(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd4_, name)
 #else
 #define compat4(n, name) .sy_narg = 0, .sy_call = (sy_call_t *)nosys
 #endif
 
 #ifdef COMPAT_FREEBSD6
-#define compat6(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd6_,name)
+#define compat6(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd6_, name)
 #else
 #define compat6(n, name) .sy_narg = 0, .sy_call = (sy_call_t *)nosys
 #endif
 
 #ifdef COMPAT_FREEBSD7
-#define compat7(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd7_,name)
+#define compat7(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd7_, name)
 #else
 #define compat7(n, name) .sy_narg = 0, .sy_call = (sy_call_t *)nosys
 #endif
 
 #ifdef COMPAT_FREEBSD10
-#define compat10(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd10_,name)
+#define compat10(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd10_, name)
 #else
 #define compat10(n, name) .sy_narg = 0, .sy_call = (sy_call_t *)nosys
 #endif
 
 #ifdef COMPAT_FREEBSD11
-#define compat11(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd11_,name)
+#define compat11(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd11_, name)
 #else
 #define compat11(n, name) .sy_narg = 0, .sy_call = (sy_call_t *)nosys
 #endif
 
 #ifdef COMPAT_FREEBSD12
-#define compat12(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd12_,name)
+#define compat12(n, name) .sy_narg = n, .sy_call = (sy_call_t *)__CONCAT(freebsd12_, name)
 #else
 #define compat12(n, name) .sy_narg = 0, .sy_call = (sy_call_t *)nosys
 #endif
@@ -489,8 +489,8 @@ struct sysent sysent[] = {
 	{ .sy_narg = AS(thr_exit_args), .sy_call = (sy_call_t *)sys_thr_exit, .sy_auevent = AUE_THR_EXIT, .sy_flags = SYF_CAPENABLED, .sy_thrcnt = SY_THR_STATIC },	/* 431 = thr_exit */
 	{ .sy_narg = AS(thr_self_args), .sy_call = (sy_call_t *)sys_thr_self, .sy_auevent = AUE_NULL, .sy_flags = SYF_CAPENABLED, .sy_thrcnt = SY_THR_STATIC },	/* 432 = thr_self */
 	{ .sy_narg = AS(thr_kill_args), .sy_call = (sy_call_t *)sys_thr_kill, .sy_auevent = AUE_THR_KILL, .sy_flags = SYF_CAPENABLED, .sy_thrcnt = SY_THR_STATIC },	/* 433 = thr_kill */
-	{ .sy_narg = 0, .sy_call = (sy_call_t *)nosys, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_ABSENT },			/* 434 = nosys */
-	{ .sy_narg = 0, .sy_call = (sy_call_t *)nosys, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_ABSENT },			/* 435 = nosys */
+	{ compat10(AS(freebsd10__umtx_lock_args),_umtx_lock), .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 434 = freebsd10 _umtx_lock */
+	{ compat10(AS(freebsd10__umtx_unlock_args),_umtx_unlock), .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 435 = freebsd10 _umtx_unlock */
 	{ .sy_narg = AS(jail_attach_args), .sy_call = (sy_call_t *)sys_jail_attach, .sy_auevent = AUE_JAIL_ATTACH, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 436 = jail_attach */
 	{ .sy_narg = AS(extattr_list_fd_args), .sy_call = (sy_call_t *)sys_extattr_list_fd, .sy_auevent = AUE_EXTATTR_LIST_FD, .sy_flags = SYF_CAPENABLED, .sy_thrcnt = SY_THR_STATIC },	/* 437 = extattr_list_fd */
 	{ .sy_narg = AS(extattr_list_file_args), .sy_call = (sy_call_t *)sys_extattr_list_file, .sy_auevent = AUE_EXTATTR_LIST_FILE, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 438 = extattr_list_file */

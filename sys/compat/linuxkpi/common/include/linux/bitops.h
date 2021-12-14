@@ -63,6 +63,11 @@
 #define	hweight64(x)	bitcount64(x)
 #define	hweight_long(x)	bitcountl(x)
 
+#define	HWEIGHT8(x)	(bitcount8((uint8_t)(x)) + 1)
+#define	HWEIGHT16(x)	(bitcount16(x) + 1)
+#define	HWEIGHT32(x)	(bitcount32(x) + 1)
+#define	HWEIGHT64(x)	(bitcount64(x) + 1)
+
 static inline int
 __ffs(int mask)
 {
@@ -405,6 +410,14 @@ sign_extend64(uint64_t value, int index)
 	uint8_t shift = 63 - index;
 
 	return ((int64_t)(value << shift) >> shift);
+}
+
+static inline uint32_t
+sign_extend32(uint32_t value, int index)
+{
+	uint8_t shift = 31 - index;
+
+	return ((int32_t)(value << shift) >> shift);
 }
 
 #endif	/* _LINUX_BITOPS_H_ */

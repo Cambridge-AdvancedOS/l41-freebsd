@@ -443,9 +443,9 @@ You can use "pkg info" to see a list of packages you have installed.
 %
 You can use the 'fetch' command to retrieve files over ftp, http or https.
 
-	 fetch https://www.FreeBSD.org/index.html
+	 fetch https://www.FreeBSD.org/images/beastie.png
 
-will download the front page of the FreeBSD web site.
+will download the beastie image from the FreeBSD web site.
 %
 You can use "whereis" to search standard binary, manual page and source
 directories for the specified programs. This can be particularly handy
@@ -798,4 +798,10 @@ You can always shrink the reserve if you need the space, but your pool will
 always have space left this way.
 
 		-- Benedict Reuschling <bcr@FreeBSD.org>
+%
+Sometimes a single slow HDD can cripple the performance of your entire system.  You can spot one like this:
+
+# gstat -I5s | sort -rn -k9 | head
+
+		-- Alan Somers <asomers@FreeBSD.org>
 %
