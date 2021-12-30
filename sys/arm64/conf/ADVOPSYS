@@ -13,3 +13,6 @@ ident		ADVOPSYS
 options 	DUMMYNET
 options 	IPFIREWALL
 options 	IPFIREWALL_DEFAULT_TO_ACCEPT
+
+options 	KDB_UNATTENDED
+options 	DDB
