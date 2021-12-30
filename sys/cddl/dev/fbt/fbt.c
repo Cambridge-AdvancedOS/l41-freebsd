@@ -202,13 +202,6 @@ fbt_provide_module(void *arg, modctl_t *lf)
 		return;
 
 	/*
-	 * HWPMC: Just not going there, due to its potential to instrument
-	 * DTrace itself.
-	 */
-	if (strcmp(modname, "hwpmc") == 0)
-		return;
-
-	/*
 	 * To register with DTrace, a module must list 'dtrace' as a
 	 * dependency in order for the kernel linker to resolve
 	 * symbols like dtrace_register(). All modules with such a
