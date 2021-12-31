@@ -16,3 +16,4 @@ options 	IPFIREWALL_DEFAULT_TO_ACCEPT
 
 options 	KDB_UNATTENDED
 options 	DDB
+options 	GDB
